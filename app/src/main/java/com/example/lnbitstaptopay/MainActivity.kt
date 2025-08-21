@@ -30,6 +30,15 @@ import com.stripe.stripeterminal.external.models.Reader
 import com.stripe.stripeterminal.external.models.TerminalException
 import android.util.Log
 import okio.Buffer
+
+import androidx.compose.ui.viewinterop.AndroidView
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.app.AlertDialog
+import android.webkit.JsResult
+import android.os.Message
 // OkHttp
 import okhttp3.Call
 import okhttp3.FormBody
@@ -39,6 +48,8 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Callback as OkHttpCallback
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 
 // JSON
 import com.squareup.moshi.Moshi
@@ -49,19 +60,26 @@ import java.io.IOException
 class MainActivity : ComponentActivity() {
 
     // === CONFIG ===
-    private val BACKEND_ORIGIN = "https://condct.com"
+    private val BACKEND_ORIGIN = "condct.com"
+    private val TPOS_ID = "PLHbmmo8LPT5UEQ57xyJA2"
+
+    private val TPOS_URL = "https://$BACKEND_ORIGIN/tpos/$TPOS_ID"
+
+    private val TPOS_WEBSOCKET = "wss://$BACKEND_ORIGIN/api/v1/ws/$TPOS_ID"
+
     private val ADMIN_BEARER_TOKEN =
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZW4iLCJhdXRoX3RpbWUiOjE3NTU3OTUyOTksImFwaV90b2tlbl9pZCI6IjgzY2RkM2IxZTgxYjRlYTBhODA4YWExMjE2NWE0ZGIwIiwiZXhwIjoxODgxNjE1NTk5fQ.q6BJKJ1AmyNJYyD_v9ZEsu_4YXJiAePueEO3H3gwXzE"
     private val TERMINAL_LOCATION_ID =
         if (BuildConfig.DEBUG) "" else "tml_GKQlZgyIgq3AAy"
     // ==============
 
-    private val base = "$BACKEND_ORIGIN/api/v1/fiat/stripe/terminal"
+    private val base = "https://$BACKEND_ORIGIN/api/v1/fiat/stripe/terminal"
 
     private val http = OkHttpClient()
     private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+
         super.onCreate(savedInstanceState)
 
         Terminal.initTerminal(
@@ -73,60 +91,199 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                var status by remember { mutableStateOf("Initializing…") }
-                var ready by remember { mutableStateOf(false) }
-                var busy by remember { mutableStateOf(false) }
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
 
-                LaunchedEffect(Unit) {
+                            // Important for POS dialogs/sheets/popups
+                            settings.javaScriptCanOpenWindowsAutomatically = true
+                            settings.setSupportMultipleWindows(true)
+                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                            settings.mediaPlaybackRequiresUserGesture = false
+
+                            webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(
+                                    view: WebView?,
+                                    request: android.webkit.WebResourceRequest?
+                                ): Boolean {
+                                    // Keep all nav in the same WebView
+                                    val url = request?.url?.toString() ?: return false
+                                    view?.loadUrl(url)
+                                    return true
+                                }
+                            }
+
+                            webChromeClient = object : WebChromeClient() {
+                                // Handle window.open / target=_blank by loading into the same WebView
+                                override fun onCreateWindow(
+                                    view: WebView?,
+                                    isDialog: Boolean,
+                                    isUserGesture: Boolean,
+                                    resultMsg: Message
+                                ): Boolean {
+                                    val transport = resultMsg.obj as WebView.WebViewTransport
+                                    // Create a transient WebView and pipe its URL back into our main one
+                                    val popup = WebView(view?.context!!)
+                                    popup.webViewClient = object : WebViewClient() {
+                                        override fun onPageFinished(v: WebView?, url: String?) {
+                                            if (!url.isNullOrEmpty()) this@apply.loadUrl(url)
+                                            popup.destroy()
+                                        }
+                                    }
+                                    transport.webView = popup
+                                    resultMsg.sendToTarget()
+                                    return true
+                                }
+
+                                // Basic JS dialog handlers (alerts/confirms)
+                                override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                                    AlertDialog.Builder(view?.context)
+                                        .setMessage(message)
+                                        .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
+                                        .setOnCancelListener { result?.cancel() }
+                                        .show()
+                                    return true
+                                }
+
+                                override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                                    AlertDialog.Builder(view?.context)
+                                        .setMessage(message)
+                                        .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
+                                        .setNegativeButton(android.R.string.cancel) { _, _ -> result?.cancel() }
+                                        .show()
+                                    return true
+                                }
+                            }
+
+                            // Optional: enables chrome://inspect debugging in dev builds
+                            if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
+
+                            loadUrl(TPOS_URL)
+                        }
+
+                    }
+                )
+            }
+        }
+        // Connect once on launch so we're ready when WS arrives
+        ensurePermissions(
+            onGranted = {
+                discoverAndConnect(
+                    onReady = { Log.i("TPOS_WS", "TapToPay reader READY") },
+                    onError = { e -> Log.e("TPOS_WS", "Startup connect error: $e") }
+                )
+            },
+            onDenied = { e -> Log.e("TPOS_WS", "Startup permissions denied: $e") }
+        )
+        startTposWebSocket()
+
+    }
+
+    // Payload model (only fields we need)
+    data class TapToPayMsg(
+        val amount: Int,
+        val currency: String,
+        val tpos_id: String? = null,
+        val charge_id: String? = null
+    )
+
+    // Parse the server's string into TapToPayMsg.
+// It tries JSON first, then falls back to key=value or {key:value} styles.
+    private fun parseTapToPay(raw: String): TapToPayMsg? {
+        // 1) Try JSON
+        runCatching {
+            val adapter = moshi.adapter(TapToPayMsg::class.java)
+            adapter.fromJson(raw)?.let { return it }
+        }
+
+        // 2) Try to normalize common non-JSON formats
+        val s = raw.trim()
+            .removePrefix("TapToPay")
+            .removePrefix("TapToPay(")
+            .removeSuffix(")")
+            .replace("""['"]""".toRegex(), "") // strip quotes if present
+
+        // Accept "amount=50, currency=gbp, ..." or "{amount:50, currency:gbp}"
+        val map = mutableMapOf<String, String>()
+        val pairs = s.split(",", ";").map { it.trim() }
+        for (p in pairs) {
+            val kv = p.split("=", ":", limit = 2).map { it.trim() }
+            if (kv.size == 2 && kv[0].isNotBlank()) map[kv[0].lowercase()] = kv[1]
+        }
+
+        val amount = map["amount"]?.toIntOrNull()
+        val currency = map["currency"]
+        return if (amount != null && !currency.isNullOrBlank()) {
+            TapToPayMsg(amount = amount, currency = currency)
+        } else null
+    }
+
+    // Open WS, listen, and charge on each valid message.
+    private fun startTposWebSocket() {
+        val req = Request.Builder().url(TPOS_WEBSOCKET).build()
+        http.newWebSocket(req, object : WebSocketListener() {
+            override fun onOpen(ws: WebSocket, response: Response) {
+                Log.i("TPOS_WS", "WebSocket connected")
+            }
+
+            override fun onMessage(ws: WebSocket, text: String) {
+                Log.i("TPOS_WS", "Message: $text")
+                val msg = parseTapToPay(text)
+                if (msg == null) {
+                    Log.w("TPOS_WS", "Could not parse TapToPay payload")
+                    return
+                }
+
+                // Ensure permissions + connect to a reader, then charge.
+                runOnUiThread {
                     ensurePermissions(
                         onGranted = {
                             discoverAndConnect(
-                                onReady = { status = "Ready. Tap to Pay available."; ready = true },
-                                onError  = { msg -> status = "❌ $msg" }
+                                onReady = {
+                                    // Stripe prefers lowercase currency codes
+                                    val cur = msg.currency.lowercase()
+
+                                    createPaymentIntent(
+                                        amount = msg.amount,   // already smallest unit (e.g., pence)
+                                        currency = cur
+                                    ) { clientSecret, err ->
+                                        if (err != null || clientSecret == null) {
+                                            Log.e("TPOS_WS", "Create PI error: $err")
+                                        } else {
+                                            collectAndProcess(
+                                                clientSecret,
+                                                onOk  = { id -> Log.i("TPOS_WS", "✅ Paid: $id") },
+                                                onFail = { e  -> Log.e("TPOS_WS", "❌ $e") }
+                                            )
+                                        }
+                                    }
+                                },
+                                onError = { e -> Log.e("TPOS_WS", "Reader not ready: $e") }
                             )
                         },
-                        onDenied = { msg -> status = "❌ $msg" }
+                        onDenied = { e -> Log.e("TPOS_WS", "Permissions denied: $e") }
                     )
                 }
-
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(status)
-                        Spacer(Modifier.height(16.dp))
-                        Button(
-                            enabled = ready && !busy,
-                            onClick = {
-                                busy = true
-                                status = "Creating $1 PaymentIntent…"
-                                createPaymentIntent(
-                                    amount = 50,
-                                    currency = "gbp"
-                                ) { clientSecret, err ->
-                                    if (err != null) {
-                                        status = "❌ $err"
-                                        busy = false
-                                    } else {
-                                        status = "Ready for tap…"
-                                        collectAndProcess(
-                                            clientSecret!!,
-                                            onOk = { id ->
-                                                status = "✅ Paid: $id"
-                                                busy = false
-                                            },
-                                            onFail = { e ->
-                                                status = "❌ $e"
-                                                busy = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        ) { Text("Charge $1") }
-                    }
-                }
             }
-        }
+
+            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                Log.e("TPOS_WS", "WebSocket failure: ${t.message}", t)
+            }
+
+            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                Log.i("TPOS_WS", "WebSocket closing: $code $reason")
+                ws.close(code, reason)
+            }
+
+            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                Log.i("TPOS_WS", "WebSocket closed: $code $reason")
+            }
+        })
     }
+
     private fun ensurePermissions(onGranted: () -> Unit, onDenied: (String) -> Unit) {
         val needed = mutableListOf<String>()
 
