@@ -1,46 +1,27 @@
 package com.example.lnbitstaptopay
 
+import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
+import com.google.androidbrowserhelper.trusted.TwaLauncher
 
 // Stripe Terminal SDK (4.6.0)
 import com.stripe.stripeterminal.Terminal
+import com.stripe.stripeterminal.external.callable.*
+import com.stripe.stripeterminal.external.models.*
 import com.stripe.stripeterminal.log.LogLevel
-import com.stripe.stripeterminal.external.callable.ConnectionTokenCallback
-import com.stripe.stripeterminal.external.callable.ConnectionTokenProvider
-import com.stripe.stripeterminal.external.callable.DiscoveryListener
-import com.stripe.stripeterminal.external.callable.PaymentIntentCallback
-import com.stripe.stripeterminal.external.callable.ReaderCallback
-import com.stripe.stripeterminal.external.callable.TerminalListener
-import com.stripe.stripeterminal.external.callable.Callback as TerminalCallback
-import com.stripe.stripeterminal.external.models.ConnectionTokenException
-import com.stripe.stripeterminal.external.models.DiscoveryConfiguration
-import com.stripe.stripeterminal.external.models.ConnectionConfiguration
-import com.stripe.stripeterminal.external.models.PaymentIntent
-import com.stripe.stripeterminal.external.models.Reader
-import com.stripe.stripeterminal.external.models.TerminalException
-
-import android.util.Log
-import androidx.compose.ui.viewinterop.AndroidView
-import android.webkit.*
-import android.app.AlertDialog
-import android.os.Message
 
 // OkHttp
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Callback as OkHttpCallback
+import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okhttp3.Callback as OkHttpCallback
 
 // JSON
 import com.squareup.moshi.Moshi
@@ -71,9 +52,12 @@ class MainActivity : ComponentActivity() {
 
     @Volatile private var busy = false
 
+    private var twaLauncher: TwaLauncher? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Stripe Terminal init
         Terminal.initTerminal(
             applicationContext,
             LogLevel.VERBOSE,
@@ -81,78 +65,7 @@ class MainActivity : ComponentActivity() {
             object : TerminalListener {}
         )
 
-        setContent {
-            MaterialTheme {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.javaScriptCanOpenWindowsAutomatically = true
-                            settings.setSupportMultipleWindows(true)
-                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                            settings.mediaPlaybackRequiresUserGesture = false
-
-                            webViewClient = object : WebViewClient() {
-                                override fun shouldOverrideUrlLoading(
-                                    view: WebView?,
-                                    request: WebResourceRequest?
-                                ): Boolean {
-                                    val url = request?.url?.toString() ?: return false
-                                    view?.loadUrl(url)
-                                    return true
-                                }
-                            }
-
-                            webChromeClient = object : WebChromeClient() {
-                                override fun onCreateWindow(
-                                    view: WebView?,
-                                    isDialog: Boolean,
-                                    isUserGesture: Boolean,
-                                    resultMsg: Message
-                                ): Boolean {
-                                    val transport = resultMsg.obj as WebView.WebViewTransport
-                                    val popup = WebView(view?.context!!)
-                                    popup.webViewClient = object : WebViewClient() {
-                                        override fun onPageFinished(v: WebView?, url: String?) {
-                                            if (!url.isNullOrEmpty()) this@apply.loadUrl(url)
-                                            popup.destroy()
-                                        }
-                                    }
-                                    transport.webView = popup
-                                    resultMsg.sendToTarget()
-                                    return true
-                                }
-
-                                override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
-                                    AlertDialog.Builder(view?.context)
-                                        .setMessage(message)
-                                        .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
-                                        .setOnCancelListener { result?.cancel() }
-                                        .show()
-                                    return true
-                                }
-
-                                override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
-                                    AlertDialog.Builder(view?.context)
-                                        .setMessage(message)
-                                        .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
-                                        .setNegativeButton(android.R.string.cancel) { _, _ -> result?.cancel() }
-                                        .show()
-                                    return true
-                                }
-                            }
-
-                            if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
-                            loadUrl(TPOS_URL)
-                        }
-                    }
-                )
-            }
-        }
-
-        // Connect once on launch so the phone-reader is ready
+        // Permissions + connect reader once on launch
         ensurePermissions(
             onGranted = {
                 discoverAndConnect(
@@ -163,7 +76,19 @@ class MainActivity : ComponentActivity() {
             onDenied = { e -> Log.e("TPOS_WS", "Startup permissions denied: $e") }
         )
 
+        // Start WebSocket command channel
         startTposWebSocket()
+
+        // Launch as Trusted Web Activity (falls back to Custom Tab if needed)
+        twaLauncher = TwaLauncher(this)
+        twaLauncher?.launch(Uri.parse(TPOS_URL))
+        // Do NOT finish(); keep activity alive so WS/Terminal remain active.
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        twaLauncher?.destroy()
+        twaLauncher = null
     }
 
     // === WS payload ===
@@ -289,7 +214,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun postCallback(msg: TapToPayMsg, paid: Boolean) {
-        // Build JSON body using Moshi
         val payload = CallbackPayload(
             amount = msg.amount,
             currency = msg.currency,
@@ -405,7 +329,7 @@ class MainActivity : ComponentActivity() {
                     })
                 }
             },
-            object : TerminalCallback {
+            object : Callback {
                 override fun onSuccess() { Log.i("TPOS_WS", "Discovery started") }
                 override fun onFailure(e: TerminalException) {
                     Log.e("TPOS_WS", "Discovery failed: ${e.errorMessage}")
