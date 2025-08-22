@@ -4,13 +4,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 
 // Stripe Terminal SDK (4.6.0)
 import com.stripe.stripeterminal.Terminal
@@ -28,20 +24,15 @@ import com.stripe.stripeterminal.external.models.ConnectionConfiguration
 import com.stripe.stripeterminal.external.models.PaymentIntent
 import com.stripe.stripeterminal.external.models.Reader
 import com.stripe.stripeterminal.external.models.TerminalException
-import android.util.Log
-import okio.Buffer
 
+import android.util.Log
 import androidx.compose.ui.viewinterop.AndroidView
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.webkit.WebChromeClient
-import android.webkit.WebSettings
+import android.webkit.*
 import android.app.AlertDialog
-import android.webkit.JsResult
 import android.os.Message
+
 // OkHttp
 import okhttp3.Call
-import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -60,17 +51,17 @@ import java.io.IOException
 class MainActivity : ComponentActivity() {
 
     // === CONFIG ===
-    private val BACKEND_ORIGIN = "condct.com"
+    private val BACKEND_ORIGIN = "condct.com" // no scheme
     private val TPOS_ID = "PLHbmmo8LPT5UEQ57xyJA2"
 
     private val TPOS_URL = "https://$BACKEND_ORIGIN/tpos/$TPOS_ID"
-
     private val TPOS_WEBSOCKET = "wss://$BACKEND_ORIGIN/api/v1/ws/$TPOS_ID"
+    private val TPOS_CALLBACK_URL = "https://$BACKEND_ORIGIN/tpos/api/v1/atm/t2p"
 
     private val ADMIN_BEARER_TOKEN =
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZW4iLCJhdXRoX3RpbWUiOjE3NTU3OTUyOTksImFwaV90b2tlbl9pZCI6IjgzY2RkM2IxZTgxYjRlYTBhODA4YWExMjE2NWE0ZGIwIiwiZXhwIjoxODgxNjE1NTk5fQ.q6BJKJ1AmyNJYyD_v9ZEsu_4YXJiAePueEO3H3gwXzE"
-    private val TERMINAL_LOCATION_ID =
-        if (BuildConfig.DEBUG) "" else "tml_GKQlZgyIgq3AAy"
+
+    private val TERMINAL_LOCATION_ID = "tml_GKQlZgyIgq3AAy"
     // ==============
 
     private val base = "https://$BACKEND_ORIGIN/api/v1/fiat/stripe/terminal"
@@ -78,8 +69,9 @@ class MainActivity : ComponentActivity() {
     private val http = OkHttpClient()
     private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+    @Volatile private var busy = false
 
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         Terminal.initTerminal(
@@ -97,8 +89,6 @@ class MainActivity : ComponentActivity() {
                         WebView(ctx).apply {
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
-
-                            // Important for POS dialogs/sheets/popups
                             settings.javaScriptCanOpenWindowsAutomatically = true
                             settings.setSupportMultipleWindows(true)
                             settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
@@ -107,9 +97,8 @@ class MainActivity : ComponentActivity() {
                             webViewClient = object : WebViewClient() {
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView?,
-                                    request: android.webkit.WebResourceRequest?
+                                    request: WebResourceRequest?
                                 ): Boolean {
-                                    // Keep all nav in the same WebView
                                     val url = request?.url?.toString() ?: return false
                                     view?.loadUrl(url)
                                     return true
@@ -117,7 +106,6 @@ class MainActivity : ComponentActivity() {
                             }
 
                             webChromeClient = object : WebChromeClient() {
-                                // Handle window.open / target=_blank by loading into the same WebView
                                 override fun onCreateWindow(
                                     view: WebView?,
                                     isDialog: Boolean,
@@ -125,7 +113,6 @@ class MainActivity : ComponentActivity() {
                                     resultMsg: Message
                                 ): Boolean {
                                     val transport = resultMsg.obj as WebView.WebViewTransport
-                                    // Create a transient WebView and pipe its URL back into our main one
                                     val popup = WebView(view?.context!!)
                                     popup.webViewClient = object : WebViewClient() {
                                         override fun onPageFinished(v: WebView?, url: String?) {
@@ -138,7 +125,6 @@ class MainActivity : ComponentActivity() {
                                     return true
                                 }
 
-                                // Basic JS dialog handlers (alerts/confirms)
                                 override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
                                     AlertDialog.Builder(view?.context)
                                         .setMessage(message)
@@ -158,17 +144,15 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
 
-                            // Optional: enables chrome://inspect debugging in dev builds
                             if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
-
                             loadUrl(TPOS_URL)
                         }
-
                     }
                 )
             }
         }
-        // Connect once on launch so we're ready when WS arrives
+
+        // Connect once on launch so the phone-reader is ready
         ensurePermissions(
             onGranted = {
                 discoverAndConnect(
@@ -178,50 +162,52 @@ class MainActivity : ComponentActivity() {
             },
             onDenied = { e -> Log.e("TPOS_WS", "Startup permissions denied: $e") }
         )
-        startTposWebSocket()
 
+        startTposWebSocket()
     }
 
-    // Payload model (only fields we need)
+    // === WS payload ===
     data class TapToPayMsg(
         val amount: Int,
         val currency: String,
         val tpos_id: String? = null,
-        val charge_id: String? = null
+        val charge_id: String? = null,
+        val paid: Boolean? = null // not sent by WS; we set it for callback
+    )
+    data class CallbackPayload(
+        val amount: Int,
+        val currency: String,
+        val tpos_id: String,
+        val charge_id: String,
+        val paid: Boolean
     )
 
-    // Parse the server's string into TapToPayMsg.
-// It tries JSON first, then falls back to key=value or {key:value} styles.
     private fun parseTapToPay(raw: String): TapToPayMsg? {
-        // 1) Try JSON
+        // try JSON first
         runCatching {
             val adapter = moshi.adapter(TapToPayMsg::class.java)
             adapter.fromJson(raw)?.let { return it }
         }
-
-        // 2) Try to normalize common non-JSON formats
+        // tolerant fallback for pydantic str()
         val s = raw.trim()
             .removePrefix("TapToPay")
             .removePrefix("TapToPay(")
             .removeSuffix(")")
-            .replace("""['"]""".toRegex(), "") // strip quotes if present
-
-        // Accept "amount=50, currency=gbp, ..." or "{amount:50, currency:gbp}"
+            .replace("""['"]""".toRegex(), "")
         val map = mutableMapOf<String, String>()
-        val pairs = s.split(",", ";").map { it.trim() }
-        for (p in pairs) {
+        s.split(",", ";", " ").map { it.trim() }.forEach { p ->
             val kv = p.split("=", ":", limit = 2).map { it.trim() }
             if (kv.size == 2 && kv[0].isNotBlank()) map[kv[0].lowercase()] = kv[1]
         }
-
         val amount = map["amount"]?.toIntOrNull()
         val currency = map["currency"]
-        return if (amount != null && !currency.isNullOrBlank()) {
-            TapToPayMsg(amount = amount, currency = currency)
-        } else null
+        val tposId = map["tpos_id"]
+        val chargeId = map["charge_id"]
+        return if (amount != null && !currency.isNullOrBlank())
+            TapToPayMsg(amount, currency, tposId, chargeId)
+        else null
     }
 
-    // Open WS, listen, and charge on each valid message.
     private fun startTposWebSocket() {
         val req = Request.Builder().url(TPOS_WEBSOCKET).build()
         http.newWebSocket(req, object : WebSocketListener() {
@@ -236,36 +222,25 @@ class MainActivity : ComponentActivity() {
                     Log.w("TPOS_WS", "Could not parse TapToPay payload")
                     return
                 }
-
-                // Ensure permissions + connect to a reader, then charge.
                 runOnUiThread {
-                    ensurePermissions(
-                        onGranted = {
-                            discoverAndConnect(
-                                onReady = {
-                                    // Stripe prefers lowercase currency codes
-                                    val cur = msg.currency.lowercase()
-
-                                    createPaymentIntent(
-                                        amount = msg.amount,   // already smallest unit (e.g., pence)
-                                        currency = cur
-                                    ) { clientSecret, err ->
-                                        if (err != null || clientSecret == null) {
-                                            Log.e("TPOS_WS", "Create PI error: $err")
-                                        } else {
-                                            collectAndProcess(
-                                                clientSecret,
-                                                onOk  = { id -> Log.i("TPOS_WS", "✅ Paid: $id") },
-                                                onFail = { e  -> Log.e("TPOS_WS", "❌ $e") }
-                                            )
-                                        }
-                                    }
-                                },
-                                onError = { e -> Log.e("TPOS_WS", "Reader not ready: $e") }
-                            )
-                        },
-                        onDenied = { e -> Log.e("TPOS_WS", "Permissions denied: $e") }
-                    )
+                    if (busy) {
+                        Log.i("TPOS_WS", "Ignoring WS: already collecting")
+                        return@runOnUiThread
+                    }
+                    val readerConnected = Terminal.getInstance().connectedReader != null
+                    if (readerConnected) {
+                        beginCharge(msg)
+                    } else {
+                        ensurePermissions(
+                            onGranted = {
+                                discoverAndConnect(
+                                    onReady = { beginCharge(msg) },
+                                    onError = { e -> Log.e("TPOS_WS", "Reader not ready: $e") }
+                                )
+                            },
+                            onDenied = { e -> Log.e("TPOS_WS", "Permissions denied: $e") }
+                        )
+                    }
                 }
             }
 
@@ -284,16 +259,73 @@ class MainActivity : ComponentActivity() {
         })
     }
 
+    private fun beginCharge(msg: TapToPayMsg) {
+        val currency = msg.currency.lowercase()
+        busy = true
+        Log.i("TPOS_WS", "Charging ${msg.amount} $currency (smallest unit)")
+        createPaymentIntent(
+            amount = msg.amount,
+            currency = currency
+        ) { clientSecret, err ->
+            if (err != null || clientSecret == null) {
+                Log.e("TPOS_WS", "Create PI error: $err")
+                busy = false
+            } else {
+                Log.i("TPOS_WS", "Client secret received, collecting…")
+                collectAndProcess(
+                    clientSecret,
+                    onOk  = { id ->
+                        Log.i("TPOS_WS", "✅ Paid: $id")
+                        postCallback(msg, paid = true)
+                        busy = false
+                    },
+                    onFail = { e  ->
+                        Log.e("TPOS_WS", "❌ $e")
+                        busy = false
+                    }
+                )
+            }
+        }
+    }
+
+    private fun postCallback(msg: TapToPayMsg, paid: Boolean) {
+        // Build JSON body using Moshi
+        val payload = CallbackPayload(
+            amount = msg.amount,
+            currency = msg.currency,
+            tpos_id = msg.tpos_id ?: "",
+            charge_id = msg.charge_id ?: "",
+            paid = paid
+        )
+        val json = moshi.adapter(CallbackPayload::class.java).toJson(payload)
+        val req = Request.Builder()
+            .url(TPOS_CALLBACK_URL)
+            .header("accept", "application/json")
+            .post(json.toRequestBody("application/json".toMediaType()))
+            .build()
+
+        http.newCall(req).enqueue(object : OkHttpCallback {
+            override fun onFailure(call: Call, e: IOException) {
+                Log.e("TPOS_WS", "Callback POST failed: ${e.message}", e)
+            }
+            override fun onResponse(call: Call, resp: Response) {
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    Log.e("TPOS_WS", "Callback HTTP ${resp.code}: $body")
+                } else {
+                    Log.i("TPOS_WS", "Callback OK: $body")
+                }
+            }
+        })
+    }
+
+    // === Permissions ===
     private fun ensurePermissions(onGranted: () -> Unit, onDenied: (String) -> Unit) {
         val needed = mutableListOf<String>()
-
-        // Location (Terminal requires this to start discovery)
         if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
             != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             needed += android.Manifest.permission.ACCESS_FINE_LOCATION
         }
-
-        // Nearby devices on Android 12+ (optional but recommended)
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_SCAN)
                 != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -304,31 +336,27 @@ class MainActivity : ComponentActivity() {
                 needed += android.Manifest.permission.BLUETOOTH_CONNECT
             }
         }
-
-        if (needed.isEmpty()) {
-            onGranted(); return
-        }
-
+        if (needed.isEmpty()) { onGranted(); return }
         val launcher = registerForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
         ) { grants ->
             val allGranted = grants.values.all { it }
-            if (allGranted) onGranted()
-            else onDenied("Location permission is required to discover readers")
+            if (allGranted) onGranted() else onDenied("Location permission is required to discover readers")
         }
         launcher.launch(needed.toTypedArray())
     }
 
+    // === Stripe Terminal plumbing ===
     private fun Request.Builder.withBearer(): Request.Builder =
         this.header("Authorization", "Bearer $ADMIN_BEARER_TOKEN")
+
     private fun tokenProvider() = object : ConnectionTokenProvider {
         override fun fetchConnectionToken(callback: ConnectionTokenCallback) {
             val req = Request.Builder()
                 .url("$base/connection_token")
                 .header("accept", "application/json")
                 .withBearer()
-                // same as curl -d '' (form-encoded empty body)
-                .post(okhttp3.FormBody.Builder().build())
+                .post("".toRequestBody("application/x-www-form-urlencoded".toMediaType()))
                 .build()
 
             http.newCall(req).enqueue(object : OkHttpCallback {
@@ -350,42 +378,39 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun discoverAndConnect(onReady: () -> Unit, onError: (String) -> Unit) {
-        val isSimulated = BuildConfig.DEBUG
-
-        // Safety: never proceed if we have no location id at all
-        if (TERMINAL_LOCATION_ID.isBlank()) {
-            onError("Stripe Location ID is missing. Set TERMINAL_LOCATION_ID to your tml_… value.")
-            return
-        }
-
         val discoveryConfig = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(
-            isSimulated = isSimulated
+            isSimulated = BuildConfig.DEBUG
         )
 
         Terminal.getInstance().discoverReaders(
             discoveryConfig,
             object : DiscoveryListener {
                 override fun onUpdateDiscoveredReaders(readers: List<Reader>) {
+                    Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
                     if (readers.isEmpty()) return
-
-                    // Always pass a non-empty locationId (required by the SDK constructor)
                     val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
                         locationId = TERMINAL_LOCATION_ID,
                         autoReconnectOnUnexpectedDisconnect = true,
                         tapToPayReaderListener = null
                     )
-
                     Terminal.getInstance().connectReader(readers.first(), cfg, object : ReaderCallback {
-                        override fun onSuccess(reader: Reader) = onReady()
-                        override fun onFailure(e: TerminalException) =
+                        override fun onSuccess(reader: Reader) {
+                            Log.i("TPOS_WS", "Connected to reader: ${reader.serialNumber}")
+                            onReady()
+                        }
+                        override fun onFailure(e: TerminalException) {
+                            Log.e("TPOS_WS", "Connect failed: ${e.errorMessage}")
                             onError("Connect failed: ${e.errorMessage}")
+                        }
                     })
                 }
             },
             object : TerminalCallback {
-                override fun onSuccess() {}
-                override fun onFailure(e: TerminalException) =
+                override fun onSuccess() { Log.i("TPOS_WS", "Discovery started") }
+                override fun onFailure(e: TerminalException) {
+                    Log.e("TPOS_WS", "Discovery failed: ${e.errorMessage}")
                     onError("Discovery failed: ${e.errorMessage}")
+                }
             }
         )
     }
@@ -399,8 +424,7 @@ class MainActivity : ComponentActivity() {
             .url("$base/payment_intents")
             .header("accept", "application/json")
             .withBearer()
-            .post("""{"amount":$amount,"currency":"$currency"}"""
-                .toRequestBody("application/json".toMediaType()))
+            .post("""{"amount":$amount,"currency":"$currency"}""".toRequestBody("application/json".toMediaType()))
             .build()
 
         http.newCall(req).enqueue(object : OkHttpCallback {
@@ -419,7 +443,6 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-
     private fun collectAndProcess(
         clientSecret: String,
         onOk: (String) -> Unit,
@@ -431,16 +454,13 @@ class MainActivity : ComponentActivity() {
                     override fun onSuccess(collected: PaymentIntent) {
                         Terminal.getInstance().confirmPaymentIntent(collected, object : PaymentIntentCallback {
                             override fun onSuccess(processed: PaymentIntent) = onOk(processed.id ?: "unknown_intent_id")
-                            override fun onFailure(e: TerminalException) =
-                                onFail("Confirm failed: ${e.errorMessage}")
+                            override fun onFailure(e: TerminalException) = onFail("Confirm failed: ${e.errorMessage}")
                         })
                     }
-                    override fun onFailure(e: TerminalException) =
-                        onFail("Collect failed: ${e.errorMessage}")
+                    override fun onFailure(e: TerminalException) = onFail("Collect failed: ${e.errorMessage}")
                 })
             }
-            override fun onFailure(e: TerminalException) =
-                onFail("Retrieve failed: ${e.errorMessage}")
+            override fun onFailure(e: TerminalException) = onFail("Retrieve failed: ${e.errorMessage}")
         })
     }
 
