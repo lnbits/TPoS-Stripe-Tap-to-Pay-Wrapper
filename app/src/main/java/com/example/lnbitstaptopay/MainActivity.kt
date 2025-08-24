@@ -2,6 +2,8 @@ package com.example.lnbitstaptopay
 
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.activity.ComponentActivity
 import com.google.androidbrowserhelper.trusted.TwaLauncher
@@ -52,6 +54,31 @@ class MainActivity : ComponentActivity() {
 
     @Volatile private var busy = false
 
+    // --- WS state / restart helpers ---
+    private var ws: WebSocket? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var wsReconnectPending = false
+    private var wsBackoffMs = 500L
+
+    private fun restartTposWebSocket(afterMs: Long = 600L) {
+        if (wsReconnectPending) return
+        wsReconnectPending = true
+        try { ws?.cancel() } catch (_: Throwable) {}
+        ws = null
+        mainHandler.postDelayed({
+            wsReconnectPending = false
+            startTposWebSocket()
+        }, afterMs)
+    }
+
+    private fun scheduleBackoffReconnect() {
+        val delay = wsBackoffMs.coerceAtMost(8000L)
+        Log.i("TPOS_WS", "Scheduling WS reconnect in ${delay}ms")
+        restartTposWebSocket(delay)
+        wsBackoffMs = (wsBackoffMs * 2).coerceAtMost(8000L)
+    }
+    // -----------------------------------
+
     private var twaLauncher: TwaLauncher? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,29 +106,20 @@ class MainActivity : ComponentActivity() {
         // Start WebSocket command channel
         startTposWebSocket()
 
-        // Launch as Trusted Web Activity (falls back to Custom Tab if needed)
+        // Launch as Trusted Web Activity
         twaLauncher = TwaLauncher(this)
         twaLauncher?.launch(Uri.parse(TPOS_URL))
-        // Do NOT finish(); keep activity alive so WS/Terminal remain active.
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        try { ws?.cancel() } catch (_: Throwable) {}
+        ws = null
         twaLauncher?.destroy()
         twaLauncher = null
     }
 
     // === WS payload ===
-    // Expect JSON like:
-    // {
-    //   "type": "tap_to_pay",
-    //   "payment_intent_id": "pi_XXXX",
-    //   "client_secret": "pi_XXXX_secret_YYYY",
-    //   "currency": "gbp",
-    //   "amount": 1234,           // smallest currency unit
-    //   "tpos_id": "PLHbmmo8LPT5UEQ57xyJA2",
-    //   "payment_hash": "..."
-    // }
     data class TapToPayMsg(
         val payment_intent_id: String?,
         val client_secret: String?,
@@ -148,16 +166,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTposWebSocket() {
+        // Ensure only one active socket
+        try { ws?.cancel() } catch (_: Throwable) {}
+        ws = null
+
         val req = Request.Builder().url(TPOS_WEBSOCKET).build()
-        http.newWebSocket(req, object : WebSocketListener() {
+        ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.i("TPOS_WS", "WebSocket connected")
+                wsBackoffMs = 500L // reset backoff on successful connect
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
                 Log.i("TPOS_WS", "Message: $text")
                 val msg = parseTapToPay(text)
-                if (msg == null) {
+                if (msg?.client_secret.isNullOrBlank() || msg?.payment_intent_id.isNullOrBlank()) {
                     Log.w("TPOS_WS", "Missing client_secret or payment_intent_id in payload")
                     return
                 }
@@ -185,21 +208,22 @@ class MainActivity : ComponentActivity() {
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 Log.e("TPOS_WS", "WebSocket failure: ${t.message}", t)
+                scheduleBackoffReconnect()
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
                 Log.i("TPOS_WS", "WebSocket closing: $code $reason")
-                ws.close(code, reason)
+                try { ws.close(code, reason) } catch (_: Throwable) {}
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.i("TPOS_WS", "WebSocket closed: $code $reason")
+                scheduleBackoffReconnect()
             }
         })
     }
 
     private fun beginCharge(msg: TapToPayMsg) {
-        // We no longer create a PI here; server did it and sent client_secret
         val clientSecret = msg.client_secret!!
         busy = true
         Log.i("TPOS_WS", "Starting Tap-to-Pay for PI ${msg.payment_intent_id}")
@@ -209,10 +233,14 @@ class MainActivity : ComponentActivity() {
             onOk  = { id ->
                 Log.i("TPOS_WS", "✅ Paid: $id")
                 busy = false
+                // Restart WS so we reliably receive the next command batch
+                restartTposWebSocket(afterMs = 500L)
             },
             onFail = { e  ->
                 Log.e("TPOS_WS", "❌ $e")
                 busy = false
+                // Also restart on failure to clear any stale WS/server state
+                restartTposWebSocket(afterMs = 800L)
             }
         )
     }
@@ -323,14 +351,18 @@ class MainActivity : ComponentActivity() {
                 Terminal.getInstance().collectPaymentMethod(pi, object : PaymentIntentCallback {
                     override fun onSuccess(collected: PaymentIntent) {
                         Terminal.getInstance().confirmPaymentIntent(collected, object : PaymentIntentCallback {
-                            override fun onSuccess(processed: PaymentIntent) = onOk(processed.id ?: "unknown_intent_id")
-                            override fun onFailure(e: TerminalException) = onFail("Confirm failed: ${e.errorMessage}")
+                            override fun onSuccess(processed: PaymentIntent) =
+                                onOk(processed.id ?: "unknown_intent_id")
+                            override fun onFailure(e: TerminalException) =
+                                onFail("Confirm failed: ${e.errorMessage}")
                         })
                     }
-                    override fun onFailure(e: TerminalException) = onFail("Collect failed: ${e.errorMessage}")
+                    override fun onFailure(e: TerminalException) =
+                        onFail("Collect failed: ${e.errorMessage}")
                 })
             }
-            override fun onFailure(e: TerminalException) = onFail("Retrieve failed: ${e.errorMessage}")
+            override fun onFailure(e: TerminalException) =
+                onFail("Retrieve failed: ${e.errorMessage}")
         })
     }
 
