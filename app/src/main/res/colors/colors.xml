@@ -1,0 +1,8 @@
+<resources>
+    <color name="lnbits_bg">#1E1B24</color>
+    <color name="lnbits_card">#282531</color>
+    <color name="lnbits_text">#E6E6E6</color>
+    <color name="lnbits_muted">#A1A1AA</color>
+    <color name="lnbits_orange">#FF7A1A</color>
+</resources>
+

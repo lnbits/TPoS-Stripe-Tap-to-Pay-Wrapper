@@ -5,6 +5,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.View
+import android.widget.Button
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import com.google.androidbrowserhelper.trusted.TwaLauncher
 
@@ -29,32 +32,33 @@ import okhttp3.Callback as OkHttpCallback
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 
+// QR
+import com.google.zxing.integration.android.IntentIntegrator
+
 import java.io.IOException
 
 class MainActivity : ComponentActivity() {
+    private val BACKEND_ORIGIN_DEFAULT = "" // no scheme
+    private val TPOS_ID_DEFAULT = ""
+    private val ADMIN_BEARER_TOKEN_DEFAULT = ""
+    private val TERMINAL_LOCATION_ID_DEFAULT = ""
 
-    // === CONFIG ===
-    private val BACKEND_ORIGIN = "condct.com" // no scheme
-    private val TPOS_ID = "PLHbmmo8LPT5UEQ57xyJA2"
+    private val prefs by lazy { getSharedPreferences("tpos_prefs", MODE_PRIVATE) }
+    private fun cfgOrigin() = prefs.getString("origin", BACKEND_ORIGIN_DEFAULT)!!
+    private fun cfgTposId() = prefs.getString("tposId", TPOS_ID_DEFAULT)!!
+    private fun cfgBearer() = prefs.getString("bearer", ADMIN_BEARER_TOKEN_DEFAULT)!!
+    private fun cfgLocId()  = prefs.getString("locId", TERMINAL_LOCATION_ID_DEFAULT)!!
+    private fun hasSavedConfig(): Boolean =
+        prefs.contains("origin") && prefs.contains("tposId") && prefs.contains("bearer") && prefs.contains("locId")
 
-    private val TPOS_URL = "https://$BACKEND_ORIGIN/tpos/$TPOS_ID"
-    private val TPOS_WEBSOCKET = "wss://$BACKEND_ORIGIN/api/v1/ws/$TPOS_ID"
-
-    private val ADMIN_BEARER_TOKEN =
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZW4iLCJhdXRoX3RpbWUiOjE3NTYwNTU1MjQsImFwaV90b2tlbl9pZCI6IjU1ZmE1NzUyMjI1NjQ0MGE5ZGQ1YzM3M2ExODZkYWQxIiwiZXhwIjoxODUwNDI1MTQ0fQ.NqWEOc5H10Zt203OJ6IbCcxnPFFfd0cfU42ek7-Un0o"
-
-    private val TERMINAL_LOCATION_ID = "tml_GKQlZgyIgq3AAy"
-    // ==============
-
-    // only used for connection_token
-    private val base = "https://$BACKEND_ORIGIN/api/v1/fiat/stripe/terminal"
+    private fun tposUrl() = "https://${cfgOrigin()}/tpos/${cfgTposId()}"
+    private fun wsUrl()   = "wss://${cfgOrigin()}/api/v1/ws/${cfgTposId()}"
+    private fun stripeBase() = "https://${cfgOrigin()}/api/v1/fiat/stripe/terminal"
 
     private val http = OkHttpClient()
     private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
     @Volatile private var busy = false
-
-    // --- WS state / restart helpers ---
     private var ws: WebSocket? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var wsReconnectPending = false
@@ -77,38 +81,15 @@ class MainActivity : ComponentActivity() {
         restartTposWebSocket(delay)
         wsBackoffMs = (wsBackoffMs * 2).coerceAtMost(8000L)
     }
-    // -----------------------------------
 
     private var twaLauncher: TwaLauncher? = null
+    private var terminalInitialized = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Stripe Terminal init
-        Terminal.initTerminal(
-            applicationContext,
-            LogLevel.VERBOSE,
-            tokenProvider(),
-            object : TerminalListener {}
-        )
-
-        // Permissions + connect reader once on launch
-        ensurePermissions(
-            onGranted = {
-                discoverAndConnect(
-                    onReady = { Log.i("TPOS_WS", "TapToPay reader READY") },
-                    onError = { e -> Log.e("TPOS_WS", "Startup connect error: $e") }
-                )
-            },
-            onDenied = { e -> Log.e("TPOS_WS", "Startup permissions denied: $e") }
-        )
-
-        // Start WebSocket command channel
-        startTposWebSocket()
-
-        // Launch as Trusted Web Activity
-        twaLauncher = TwaLauncher(this)
-        twaLauncher?.launch(Uri.parse(TPOS_URL))
+        setContentView(R.layout.activity_onboarding)
+        initOnboardingUi()
     }
 
     override fun onDestroy() {
@@ -119,7 +100,103 @@ class MainActivity : ComponentActivity() {
         twaLauncher = null
     }
 
-    // === WS payload ===
+    private fun initOnboardingUi() {
+        val btnScan = findViewById<Button>(R.id.btnScan)
+        val btnContinue = findViewById<Button>(R.id.btnContinue)
+        val tvSummary = findViewById<TextView>(R.id.tvSummary)
+
+        fun refresh() {
+            if (hasSavedConfig()) {
+                btnContinue.visibility = View.VISIBLE
+                tvSummary.text = "Saved: https://${cfgOrigin()}/tpos/${cfgTposId()} (pos=${cfgLocId()})"
+            } else {
+                btnContinue.visibility = View.GONE
+                tvSummary.text = ""
+            }
+        }
+        refresh()
+
+        btnScan.setOnClickListener {
+            IntentIntegrator(this)
+                .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
+                .setPrompt("Scan Pairing Link")
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+                .initiateScan()
+        }
+
+        btnContinue.setOnClickListener {
+            startPosFlow()
+        }
+    }
+
+    @Deprecated("ZXing Embedded uses onActivityResult for simplicity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
+        if (result != null && result.contents != null) {
+            val ok = saveFromPairingUrl(result.contents)
+            if (ok) {
+                Log.i("TPOS_PAIR", "Saved config from pairing URL")
+                // Show continue button
+                findViewById<Button>(R.id.btnContinue)?.visibility = View.VISIBLE
+                findViewById<TextView>(R.id.tvSummary)?.text =
+                    "Saved: https://${cfgOrigin()}/tpos/${cfgTposId()} (pos=${cfgLocId()})"
+            } else {
+                Log.e("TPOS_PAIR", "Invalid pairing URL: ${result.contents}")
+            }
+            return
+        }
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
+    private fun saveFromPairingUrl(url: String): Boolean {
+        return runCatching {
+            val u = Uri.parse(url)
+            val host = u.host ?: return false
+            val port = if (u.port != -1) ":${u.port}" else ""
+            val segs = u.pathSegments
+            if (segs.size < 2 || segs[0] != "tpos") return false
+            val tposId = segs[1]
+            val pos  = u.getQueryParameter("pos") ?: return false
+            val auth = u.getQueryParameter("auth") ?: return false
+
+            prefs.edit()
+                .putString("origin", host + port)
+                .putString("tposId", tposId)
+                .putString("bearer", auth)
+                .putString("locId", pos)
+                .apply()
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun startPosFlow() {
+        if (!terminalInitialized) {
+            Terminal.initTerminal(
+                applicationContext,
+                LogLevel.VERBOSE,
+                tokenProvider(),
+                object : TerminalListener {}
+            )
+            terminalInitialized = true
+        }
+
+        ensurePermissions(
+            onGranted = {
+                discoverAndConnect(
+                    onReady = { Log.i("TPOS_WS", "TapToPay reader READY") },
+                    onError = { e -> Log.e("TPOS_WS", "Startup connect error: $e") }
+                )
+            },
+            onDenied = { e -> Log.e("TPOS_WS", "Startup permissions denied: $e") }
+        )
+
+        startTposWebSocket()
+
+        if (twaLauncher == null) twaLauncher = TwaLauncher(this)
+        twaLauncher?.launch(Uri.parse(tposUrl()))
+    }
+
     data class TapToPayMsg(
         val payment_intent_id: String?,
         val client_secret: String?,
@@ -128,23 +205,13 @@ class MainActivity : ComponentActivity() {
         val tpos_id: String? = null,
         val payment_hash: String? = null
     )
-
-    data class CallbackPayload(
-        val amount: Int,
-        val currency: String,
-        val tpos_id: String,
-        val charge_id: String,
-        val paid: Boolean
-    )
+    data class TokenResp(val secret: String?)
 
     private fun parseTapToPay(raw: String): TapToPayMsg? {
-        // Try JSON first
         runCatching {
             val adapter = moshi.adapter(TapToPayMsg::class.java)
             adapter.fromJson(raw)?.let { return it }
         }
-
-        // Tolerant fallback if server ever sent a string payload
         val s = raw.trim()
             .removePrefix("TapToPay")
             .removePrefix("TapToPay(")
@@ -166,15 +233,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTposWebSocket() {
-        // Ensure only one active socket
         try { ws?.cancel() } catch (_: Throwable) {}
         ws = null
 
-        val req = Request.Builder().url(TPOS_WEBSOCKET).build()
+        val req = Request.Builder().url(wsUrl()).build()
         ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.i("TPOS_WS", "WebSocket connected")
-                wsBackoffMs = 500L // reset backoff on successful connect
+                wsBackoffMs = 500L
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
@@ -233,19 +299,16 @@ class MainActivity : ComponentActivity() {
             onOk  = { id ->
                 Log.i("TPOS_WS", "✅ Paid: $id")
                 busy = false
-                // Restart WS so we reliably receive the next command batch
                 restartTposWebSocket(afterMs = 500L)
             },
             onFail = { e  ->
                 Log.e("TPOS_WS", "❌ $e")
                 busy = false
-                // Also restart on failure to clear any stale WS/server state
                 restartTposWebSocket(afterMs = 800L)
             }
         )
     }
 
-    // === Permissions ===
     private fun ensurePermissions(onGranted: () -> Unit, onDenied: (String) -> Unit) {
         val needed = mutableListOf<String>()
         if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
@@ -272,14 +335,13 @@ class MainActivity : ComponentActivity() {
         launcher.launch(needed.toTypedArray())
     }
 
-    // === Stripe Terminal plumbing ===
     private fun Request.Builder.withBearer(): Request.Builder =
-        this.header("Authorization", "Bearer $ADMIN_BEARER_TOKEN")
+        this.header("Authorization", "Bearer ${cfgBearer()}")
 
     private fun tokenProvider() = object : ConnectionTokenProvider {
         override fun fetchConnectionToken(callback: ConnectionTokenCallback) {
             val req = Request.Builder()
-                .url("$base/connection_token")
+                .url("${stripeBase()}/connection_token")
                 .header("accept", "application/json")
                 .withBearer()
                 .post("".toRequestBody("application/x-www-form-urlencoded".toMediaType()))
@@ -315,7 +377,7 @@ class MainActivity : ComponentActivity() {
                     Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
                     if (readers.isEmpty()) return
                     val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
-                        locationId = TERMINAL_LOCATION_ID,
+                        locationId = cfgLocId(),
                         autoReconnectOnUnexpectedDisconnect = true,
                         tapToPayReaderListener = null
                     )
@@ -365,7 +427,4 @@ class MainActivity : ComponentActivity() {
                 onFail("Retrieve failed: ${e.errorMessage}")
         })
     }
-
-    // JSON models
-    data class TokenResp(val secret: String?)
 }

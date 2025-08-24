@@ -57,6 +57,8 @@ android {
 }
 
 dependencies {
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    implementation("com.google.zxing:core:3.5.1")
     implementation("com.google.androidbrowserhelper:androidbrowserhelper:2.5.0")
     // --- Stripe Terminal (Tap to Pay) ---
     implementation("com.stripe:stripeterminal-taptopay:4.6.0")
