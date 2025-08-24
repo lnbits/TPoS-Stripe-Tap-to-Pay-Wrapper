@@ -37,14 +37,14 @@ class MainActivity : ComponentActivity() {
 
     private val TPOS_URL = "https://$BACKEND_ORIGIN/tpos/$TPOS_ID"
     private val TPOS_WEBSOCKET = "wss://$BACKEND_ORIGIN/api/v1/ws/$TPOS_ID"
-    private val TPOS_CALLBACK_URL = "https://$BACKEND_ORIGIN/tpos/api/v1/atm/t2p"
 
     private val ADMIN_BEARER_TOKEN =
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZW4iLCJhdXRoX3RpbWUiOjE3NTU3OTUyOTksImFwaV90b2tlbl9pZCI6IjgzY2RkM2IxZTgxYjRlYTBhODA4YWExMjE2NWE0ZGIwIiwiZXhwIjoxODgxNjE1NTk5fQ.q6BJKJ1AmyNJYyD_v9ZEsu_4YXJiAePueEO3H3gwXzE"
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZW4iLCJhdXRoX3RpbWUiOjE3NTYwNTU1MjQsImFwaV90b2tlbl9pZCI6IjU1ZmE1NzUyMjI1NjQ0MGE5ZGQ1YzM3M2ExODZkYWQxIiwiZXhwIjoxODUwNDI1MTQ0fQ.NqWEOc5H10Zt203OJ6IbCcxnPFFfd0cfU42ek7-Un0o"
 
     private val TERMINAL_LOCATION_ID = "tml_GKQlZgyIgq3AAy"
     // ==============
 
+    // only used for connection_token
     private val base = "https://$BACKEND_ORIGIN/api/v1/fiat/stripe/terminal"
 
     private val http = OkHttpClient()
@@ -92,13 +92,25 @@ class MainActivity : ComponentActivity() {
     }
 
     // === WS payload ===
+    // Expect JSON like:
+    // {
+    //   "type": "tap_to_pay",
+    //   "payment_intent_id": "pi_XXXX",
+    //   "client_secret": "pi_XXXX_secret_YYYY",
+    //   "currency": "gbp",
+    //   "amount": 1234,           // smallest currency unit
+    //   "tpos_id": "PLHbmmo8LPT5UEQ57xyJA2",
+    //   "payment_hash": "..."
+    // }
     data class TapToPayMsg(
-        val amount: Int,
-        val currency: String,
+        val payment_intent_id: String?,
+        val client_secret: String?,
+        val currency: String?,
+        val amount: Int?,
         val tpos_id: String? = null,
-        val charge_id: String? = null,
-        val paid: Boolean? = null // not sent by WS; we set it for callback
+        val payment_hash: String? = null
     )
+
     data class CallbackPayload(
         val amount: Int,
         val currency: String,
@@ -108,12 +120,13 @@ class MainActivity : ComponentActivity() {
     )
 
     private fun parseTapToPay(raw: String): TapToPayMsg? {
-        // try JSON first
+        // Try JSON first
         runCatching {
             val adapter = moshi.adapter(TapToPayMsg::class.java)
             adapter.fromJson(raw)?.let { return it }
         }
-        // tolerant fallback for pydantic str()
+
+        // Tolerant fallback if server ever sent a string payload
         val s = raw.trim()
             .removePrefix("TapToPay")
             .removePrefix("TapToPay(")
@@ -124,13 +137,14 @@ class MainActivity : ComponentActivity() {
             val kv = p.split("=", ":", limit = 2).map { it.trim() }
             if (kv.size == 2 && kv[0].isNotBlank()) map[kv[0].lowercase()] = kv[1]
         }
-        val amount = map["amount"]?.toIntOrNull()
-        val currency = map["currency"]
-        val tposId = map["tpos_id"]
-        val chargeId = map["charge_id"]
-        return if (amount != null && !currency.isNullOrBlank())
-            TapToPayMsg(amount, currency, tposId, chargeId)
-        else null
+        return TapToPayMsg(
+            payment_intent_id = map["payment_intent_id"],
+            client_secret     = map["client_secret"],
+            currency          = map["currency"],
+            amount            = map["amount"]?.toIntOrNull(),
+            tpos_id           = map["tpos_id"],
+            payment_hash      = map["payment_hash"]
+        )
     }
 
     private fun startTposWebSocket() {
@@ -144,7 +158,7 @@ class MainActivity : ComponentActivity() {
                 Log.i("TPOS_WS", "Message: $text")
                 val msg = parseTapToPay(text)
                 if (msg == null) {
-                    Log.w("TPOS_WS", "Could not parse TapToPay payload")
+                    Log.w("TPOS_WS", "Missing client_secret or payment_intent_id in payload")
                     return
                 }
                 runOnUiThread {
@@ -154,12 +168,12 @@ class MainActivity : ComponentActivity() {
                     }
                     val readerConnected = Terminal.getInstance().connectedReader != null
                     if (readerConnected) {
-                        beginCharge(msg)
+                        beginCharge(msg!!)
                     } else {
                         ensurePermissions(
                             onGranted = {
                                 discoverAndConnect(
-                                    onReady = { beginCharge(msg) },
+                                    onReady = { beginCharge(msg!!) },
                                     onError = { e -> Log.e("TPOS_WS", "Reader not ready: $e") }
                                 )
                             },
@@ -185,62 +199,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun beginCharge(msg: TapToPayMsg) {
-        val currency = msg.currency.lowercase()
+        // We no longer create a PI here; server did it and sent client_secret
+        val clientSecret = msg.client_secret!!
         busy = true
-        Log.i("TPOS_WS", "Charging ${msg.amount} $currency (smallest unit)")
-        createPaymentIntent(
-            amount = msg.amount,
-            currency = currency
-        ) { clientSecret, err ->
-            if (err != null || clientSecret == null) {
-                Log.e("TPOS_WS", "Create PI error: $err")
+        Log.i("TPOS_WS", "Starting Tap-to-Pay for PI ${msg.payment_intent_id}")
+
+        collectAndProcess(
+            clientSecret,
+            onOk  = { id ->
+                Log.i("TPOS_WS", "✅ Paid: $id")
                 busy = false
-            } else {
-                Log.i("TPOS_WS", "Client secret received, collecting…")
-                collectAndProcess(
-                    clientSecret,
-                    onOk  = { id ->
-                        Log.i("TPOS_WS", "✅ Paid: $id")
-                        postCallback(msg, paid = true)
-                        busy = false
-                    },
-                    onFail = { e  ->
-                        Log.e("TPOS_WS", "❌ $e")
-                        busy = false
-                    }
-                )
+            },
+            onFail = { e  ->
+                Log.e("TPOS_WS", "❌ $e")
+                busy = false
             }
-        }
-    }
-
-    private fun postCallback(msg: TapToPayMsg, paid: Boolean) {
-        val payload = CallbackPayload(
-            amount = msg.amount,
-            currency = msg.currency,
-            tpos_id = msg.tpos_id ?: "",
-            charge_id = msg.charge_id ?: "",
-            paid = paid
         )
-        val json = moshi.adapter(CallbackPayload::class.java).toJson(payload)
-        val req = Request.Builder()
-            .url(TPOS_CALLBACK_URL)
-            .header("accept", "application/json")
-            .post(json.toRequestBody("application/json".toMediaType()))
-            .build()
-
-        http.newCall(req).enqueue(object : OkHttpCallback {
-            override fun onFailure(call: Call, e: IOException) {
-                Log.e("TPOS_WS", "Callback POST failed: ${e.message}", e)
-            }
-            override fun onResponse(call: Call, resp: Response) {
-                val body = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) {
-                    Log.e("TPOS_WS", "Callback HTTP ${resp.code}: $body")
-                } else {
-                    Log.i("TPOS_WS", "Callback OK: $body")
-                }
-            }
-        })
     }
 
     // === Permissions ===
@@ -339,34 +313,6 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun createPaymentIntent(
-        amount: Int,
-        currency: String,
-        onResult: (String?, String?) -> Unit
-    ) {
-        val req = Request.Builder()
-            .url("$base/payment_intents")
-            .header("accept", "application/json")
-            .withBearer()
-            .post("""{"amount":$amount,"currency":"$currency"}""".toRequestBody("application/json".toMediaType()))
-            .build()
-
-        http.newCall(req).enqueue(object : OkHttpCallback {
-            override fun onFailure(call: Call, e: IOException) = onResult(null, e.message)
-            override fun onResponse(call: Call, resp: Response) {
-                val body = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) {
-                    onResult(null, "HTTP ${resp.code}: $body"); return
-                }
-                val parsed = moshi.adapter(PIResp::class.java).fromJson(body)
-                if (parsed?.client_secret.isNullOrBlank())
-                    onResult(null, "Missing client_secret in response")
-                else
-                    onResult(parsed.client_secret, null)
-            }
-        })
-    }
-
     private fun collectAndProcess(
         clientSecret: String,
         onOk: (String) -> Unit,
@@ -390,5 +336,4 @@ class MainActivity : ComponentActivity() {
 
     // JSON models
     data class TokenResp(val secret: String?)
-    data class PIResp(val client_secret: String?)
 }
