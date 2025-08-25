@@ -95,6 +95,9 @@ class MainActivity : ComponentActivity() {
         }
 
         initOnboardingUi()
+
+        // 🔹 Prompt for all core permissions on app start
+        requestCorePermissionsOnStart()
     }
 
     override fun onDestroy() {
@@ -332,26 +335,38 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    // ---- request perms on start
+    private fun requestCorePermissionsOnStart() {
+        ensurePermissions(
+            onGranted = { Log.i("TPOS_PERM", "Startup permissions granted") },
+            onDenied  = { Log.w("TPOS_PERM", it) }
+        )
+    }
+
+    // ---- reusable permission checker
     private fun ensurePermissions(onGranted: () -> Unit, onDenied: (String) -> Unit) {
-        val needed = mutableListOf<String>()
+        val need = mutableListOf<String>()
+        val api = android.os.Build.VERSION.SDK_INT
 
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            needed += Manifest.permission.ACCESS_FINE_LOCATION
-        }
-        if (android.os.Build.VERSION.SDK_INT >= 31) {
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                needed += Manifest.permission.BLUETOOTH_SCAN
-            }
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                needed += Manifest.permission.BLUETOOTH_CONNECT
-            }
-        }
+        // Camera for QR scan
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+            need += Manifest.permission.CAMERA
 
-        if (needed.isEmpty()) { onGranted(); return }
+        if (api >= 31) { // Android 12+
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED)
+                need += Manifest.permission.BLUETOOTH_SCAN
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+                need += Manifest.permission.BLUETOOTH_CONNECT
+        }
+        // Many devices still gate discovery behind Location
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
+            need += Manifest.permission.ACCESS_FINE_LOCATION
+
+        if (need.isEmpty()) { onGranted(); return }
 
         onPermsGranted = onGranted
-        onPermsDenied = onDenied
-        permissionLauncher.launch(needed.toTypedArray())
+        onPermsDenied  = onDenied
+        permissionLauncher.launch(need.toTypedArray())
     }
 
     private fun Request.Builder.withBearer(): Request.Builder =
@@ -384,7 +399,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-        private fun discoverAndConnect(onReady: () -> Unit, onError: (String) -> Unit) {
+    private fun discoverAndConnect(onReady: () -> Unit, onError: (String) -> Unit) {
         val discoveryConfig = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(
             isSimulated = BuildConfig.DEBUG
         )
@@ -396,7 +411,7 @@ class MainActivity : ComponentActivity() {
                     Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
                     if (readers.isEmpty()) return
                     val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
-                        locationId = cfgLocId(),   // SAME as your old code
+                        locationId = cfgLocId(),
                         autoReconnectOnUnexpectedDisconnect = true,
                         tapToPayReaderListener = null
                     )
