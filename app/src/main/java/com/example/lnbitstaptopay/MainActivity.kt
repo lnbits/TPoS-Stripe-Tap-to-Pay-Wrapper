@@ -1,5 +1,8 @@
 package com.example.lnbitstaptopay
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -9,6 +12,9 @@ import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.browser.customtabs.CustomTabsIntent
 import com.google.androidbrowserhelper.trusted.TwaLauncher
 
 // Stripe Terminal SDK (4.6.0)
@@ -32,12 +38,14 @@ import okhttp3.Callback as OkHttpCallback
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 
-// QR
+// QR (ZXing)
 import com.google.zxing.integration.android.IntentIntegrator
 
 import java.io.IOException
 
 class MainActivity : ComponentActivity() {
+
+    // ---- persisted config defaults
     private val BACKEND_ORIGIN_DEFAULT = "" // no scheme
     private val TPOS_ID_DEFAULT = ""
     private val ADMIN_BEARER_TOKEN_DEFAULT = ""
@@ -64,6 +72,40 @@ class MainActivity : ComponentActivity() {
     private var wsReconnectPending = false
     private var wsBackoffMs = 500L
 
+    private var twaLauncher: TwaLauncher? = null
+    private var terminalInitialized = false
+
+    // ---- permission launcher (register once)
+    private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
+    private var onPermsGranted: (() -> Unit)? = null
+    private var onPermsDenied: ((String) -> Unit)? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_onboarding)
+
+        // Register once here (prevents late-registration crash after scan/continue)
+        permissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) { grants ->
+            val allGranted = grants.values.all { it }
+            if (allGranted) onPermsGranted?.invoke()
+            else onPermsDenied?.invoke("Required permissions not granted")
+            onPermsGranted = null
+            onPermsDenied = null
+        }
+
+        initOnboardingUi()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try { ws?.cancel() } catch (_: Throwable) {}
+        ws = null
+        twaLauncher?.destroy()
+        twaLauncher = null
+    }
+
     private fun restartTposWebSocket(afterMs: Long = 600L) {
         if (wsReconnectPending) return
         wsReconnectPending = true
@@ -80,24 +122,6 @@ class MainActivity : ComponentActivity() {
         Log.i("TPOS_WS", "Scheduling WS reconnect in ${delay}ms")
         restartTposWebSocket(delay)
         wsBackoffMs = (wsBackoffMs * 2).coerceAtMost(8000L)
-    }
-
-    private var twaLauncher: TwaLauncher? = null
-    private var terminalInitialized = false
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        setContentView(R.layout.activity_onboarding)
-        initOnboardingUi()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        try { ws?.cancel() } catch (_: Throwable) {}
-        ws = null
-        twaLauncher?.destroy()
-        twaLauncher = null
     }
 
     private fun initOnboardingUi() {
@@ -131,13 +155,12 @@ class MainActivity : ComponentActivity() {
     }
 
     @Deprecated("ZXing Embedded uses onActivityResult for simplicity")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
         if (result != null && result.contents != null) {
             val ok = saveFromPairingUrl(result.contents)
             if (ok) {
                 Log.i("TPOS_PAIR", "Saved config from pairing URL")
-                // Show continue button
                 findViewById<Button>(R.id.btnContinue)?.visibility = View.VISIBLE
                 findViewById<TextView>(R.id.tvSummary)?.text =
                     "Saved: https://${cfgOrigin()}/tpos/${cfgTposId()} (pos=${cfgLocId()})"
@@ -192,11 +215,24 @@ class MainActivity : ComponentActivity() {
         )
 
         startTposWebSocket()
-
-        if (twaLauncher == null) twaLauncher = TwaLauncher(this)
-        twaLauncher?.launch(Uri.parse(tposUrl()))
+        openLinkSafely(Uri.parse(tposUrl()))
     }
 
+    // ---- TWA / CustomTabs safe opener
+    private fun openLinkSafely(uri: Uri) {
+        try {
+            if (twaLauncher == null) twaLauncher = TwaLauncher(this)
+            twaLauncher?.launch(uri)
+        } catch (_: Throwable) {
+            try {
+                CustomTabsIntent.Builder().build().launchUrl(this, uri)
+            } catch (_: Throwable) {
+                startActivity(Intent(Intent.ACTION_VIEW, uri))
+            }
+        }
+    }
+
+    // ---- WS payloads
     data class TapToPayMsg(
         val payment_intent_id: String?,
         val client_secret: String?,
@@ -311,28 +347,24 @@ class MainActivity : ComponentActivity() {
 
     private fun ensurePermissions(onGranted: () -> Unit, onDenied: (String) -> Unit) {
         val needed = mutableListOf<String>()
-        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
-            != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            needed += android.Manifest.permission.ACCESS_FINE_LOCATION
+
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            needed += Manifest.permission.ACCESS_FINE_LOCATION
         }
         if (android.os.Build.VERSION.SDK_INT >= 31) {
-            if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_SCAN)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                needed += android.Manifest.permission.BLUETOOTH_SCAN
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                needed += Manifest.permission.BLUETOOTH_SCAN
             }
-            if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                needed += android.Manifest.permission.BLUETOOTH_CONNECT
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                needed += Manifest.permission.BLUETOOTH_CONNECT
             }
         }
+
         if (needed.isEmpty()) { onGranted(); return }
-        val launcher = registerForActivityResult(
-            androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
-        ) { grants ->
-            val allGranted = grants.values.all { it }
-            if (allGranted) onGranted() else onDenied("Location permission is required to discover readers")
-        }
-        launcher.launch(needed.toTypedArray())
+
+        onPermsGranted = onGranted
+        onPermsDenied = onDenied
+        permissionLauncher.launch(needed.toTypedArray())
     }
 
     private fun Request.Builder.withBearer(): Request.Builder =
@@ -366,6 +398,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun discoverAndConnect(onReady: () -> Unit, onError: (String) -> Unit) {
+        val loc = cfgLocId()
+        if (loc.isBlank()) {
+            Log.e("TPOS_WS", "Missing Stripe Terminal location ID")
+            onError("Missing Stripe Terminal location ID")
+            return
+        }
+
         val discoveryConfig = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(
             isSimulated = BuildConfig.DEBUG
         )
@@ -377,7 +416,7 @@ class MainActivity : ComponentActivity() {
                     Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
                     if (readers.isEmpty()) return
                     val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
-                        locationId = cfgLocId(),
+                        locationId = loc,
                         autoReconnectOnUnexpectedDisconnect = true,
                         tapToPayReaderListener = null
                     )
