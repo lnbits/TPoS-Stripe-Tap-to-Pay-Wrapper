@@ -14,7 +14,6 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.browser.customtabs.CustomTabsIntent
 import com.google.androidbrowserhelper.trusted.TwaLauncher
 
 // Stripe Terminal SDK (4.6.0)
@@ -84,7 +83,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_onboarding)
 
-        // Register once here (prevents late-registration crash after scan/continue)
+        // Register once here (fixes the late-registration crash)
         permissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) { grants ->
@@ -214,25 +213,13 @@ class MainActivity : ComponentActivity() {
             onDenied = { e -> Log.e("TPOS_WS", "Startup permissions denied: $e") }
         )
 
+        // EXACTLY like the old flow: start WS then launch TWA
         startTposWebSocket()
-        openLinkSafely(Uri.parse(tposUrl()))
+
+        if (twaLauncher == null) twaLauncher = TwaLauncher(this)
+        twaLauncher?.launch(Uri.parse(tposUrl()))
     }
 
-    // ---- TWA / CustomTabs safe opener
-    private fun openLinkSafely(uri: Uri) {
-        try {
-            if (twaLauncher == null) twaLauncher = TwaLauncher(this)
-            twaLauncher?.launch(uri)
-        } catch (_: Throwable) {
-            try {
-                CustomTabsIntent.Builder().build().launchUrl(this, uri)
-            } catch (_: Throwable) {
-                startActivity(Intent(Intent.ACTION_VIEW, uri))
-            }
-        }
-    }
-
-    // ---- WS payloads
     data class TapToPayMsg(
         val payment_intent_id: String?,
         val client_secret: String?,
@@ -397,14 +384,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun discoverAndConnect(onReady: () -> Unit, onError: (String) -> Unit) {
-        val loc = cfgLocId()
-        if (loc.isBlank()) {
-            Log.e("TPOS_WS", "Missing Stripe Terminal location ID")
-            onError("Missing Stripe Terminal location ID")
-            return
-        }
-
+        private fun discoverAndConnect(onReady: () -> Unit, onError: (String) -> Unit) {
         val discoveryConfig = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(
             isSimulated = BuildConfig.DEBUG
         )
@@ -416,7 +396,7 @@ class MainActivity : ComponentActivity() {
                     Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
                     if (readers.isEmpty()) return
                     val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
-                        locationId = loc,
+                        locationId = cfgLocId(),   // SAME as your old code
                         autoReconnectOnUnexpectedDisconnect = true,
                         tapToPayReaderListener = null
                     )
