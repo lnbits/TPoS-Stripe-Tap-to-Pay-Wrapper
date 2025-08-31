@@ -37,10 +37,12 @@ import okhttp3.Callback as OkHttpCallback
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 
-// QR (ZXing)
-import com.google.zxing.integration.android.IntentIntegrator
+// QR (ZXing modern API)
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 
 import java.io.IOException
+import androidx.core.net.toUri
 
 class MainActivity : ComponentActivity() {
 
@@ -78,6 +80,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     private var onPermsGranted: (() -> Unit)? = null
     private var onPermsDenied: ((String) -> Unit)? = null
+
+    // ---- QR Scanner launcher (modern API)
+    private val qrLauncher = registerForActivityResult(ScanContract()) { result ->
+        if (result.contents != null) {
+            val ok = saveFromPairingUrl(result.contents!!)
+            if (ok) {
+                Log.i("TPOS_PAIR", "Saved config from pairing URL")
+                findViewById<Button>(R.id.btnContinue)?.visibility = View.VISIBLE
+                findViewById<TextView>(R.id.tvSummary)?.text =
+                    "Saved: https://${cfgOrigin()}/tpos/${cfgTposId()} (pos=${cfgLocId()})"
+            } else {
+                Log.e("TPOS_PAIR", "Invalid pairing URL: ${result.contents}")
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -143,12 +160,13 @@ class MainActivity : ComponentActivity() {
         refresh()
 
         btnScan.setOnClickListener {
-            IntentIntegrator(this)
-                .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
+            val opts = ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                 .setPrompt("Scan Pairing Link")
                 .setBeepEnabled(false)
-                .setOrientationLocked(false)
-                .initiateScan()
+                .setOrientationLocked(true)
+                .setCaptureActivity(PortraitCaptureActivity::class.java) // <- force portrait
+            qrLauncher.launch(opts)
         }
 
         btnContinue.setOnClickListener {
@@ -156,27 +174,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Deprecated("ZXing Embedded uses onActivityResult for simplicity")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
-        if (result != null && result.contents != null) {
-            val ok = saveFromPairingUrl(result.contents)
-            if (ok) {
-                Log.i("TPOS_PAIR", "Saved config from pairing URL")
-                findViewById<Button>(R.id.btnContinue)?.visibility = View.VISIBLE
-                findViewById<TextView>(R.id.tvSummary)?.text =
-                    "Saved: https://${cfgOrigin()}/tpos/${cfgTposId()} (pos=${cfgLocId()})"
-            } else {
-                Log.e("TPOS_PAIR", "Invalid pairing URL: ${result.contents}")
-            }
-            return
-        }
-        super.onActivityResult(requestCode, resultCode, data)
-    }
-
     private fun saveFromPairingUrl(url: String): Boolean {
         return runCatching {
-            val u = Uri.parse(url)
+            val u = url.toUri()
             val host = u.host ?: return false
             val port = if (u.port != -1) ":${u.port}" else ""
             val segs = u.pathSegments
