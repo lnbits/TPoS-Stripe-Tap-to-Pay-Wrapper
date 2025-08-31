@@ -3,6 +3,7 @@ package com.example.lnbitstaptopay
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -42,7 +43,7 @@ import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 
-// NEW: eligibility helpers
+// NEW: eligibility + dialogs
 import android.app.AlertDialog
 import android.nfc.NfcAdapter
 import com.google.android.gms.common.ConnectionResult
@@ -82,6 +83,11 @@ class MainActivity : ComponentActivity() {
 
     private var twaLauncher: TwaLauncher? = null
     private var terminalInitialized = false
+
+    // Discovery/connect state for timeout fallback
+    private var discoveryStarted = false
+    private var readerConnected = false
+    private var discoveryTimeoutPosted = false
 
     // ---- permission launcher (register once)
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
@@ -211,6 +217,16 @@ class MainActivity : ComponentActivity() {
         return ok to msg
     }
 
+    private fun maybeResolvePlayServices(): Boolean {
+        val gaa = GoogleApiAvailability.getInstance()
+        val code = gaa.isGooglePlayServicesAvailable(this)
+        if (gaa.isUserResolvableError(code)) {
+            gaa.getErrorDialog(this, code, 0)?.show()
+            return true
+        }
+        return false
+    }
+
     private fun hasPlayStore(): Boolean {
         return try {
             if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -228,12 +244,33 @@ class MainActivity : ComponentActivity() {
     private fun hasNfcEnabled(): Boolean =
         NfcAdapter.getDefaultAdapter(this)?.isEnabled == true
 
+    private fun isLocationEnabled(): Boolean {
+        val lm = getSystemService(LOCATION_SERVICE) as LocationManager
+        return try {
+            lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                    lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** SDK-level hint; returns true if API missing to avoid false negatives */
+    private fun supportsTapToPayDiscovery(): Boolean = try {
+        // If you have DiscoveryMethod import: check support explicitly.
+        // Terminal.supportsDiscoveryMethod(DiscoveryMethod.TAP_TO_PAY)  // <- Uncomment if available
+        true
+    } catch (_: Throwable) {
+        true
+    }
+
     /** @return reason string if NOT eligible, else null */
     private fun tapToPayEligibleReason(): String? {
         val (gmsOk, gmsMsg) = hasPlayServices()
         if (!gmsOk) return "Google Play services not available: ${gmsMsg ?: "unknown error"}"
         if (!hasPlayStore()) return "Google Play Store app not installed"
         if (!hasNfcEnabled()) return "NFC is missing or turned off"
+        if (!isLocationEnabled()) return "Location services are turned off"
+        if (!supportsTapToPayDiscovery()) return "SDK reports Tap to Pay discovery not supported"
         return null
     }
 
@@ -247,20 +284,32 @@ class MainActivity : ComponentActivity() {
             )
             .setPositiveButton("OK", null)
 
-        if (reason.contains("NFC", ignoreCase = true)) {
-            builder.setNegativeButton("Open NFC settings") { _, _ ->
-                try { startActivity(Intent(Settings.ACTION_NFC_SETTINGS)) } catch (_: Exception) {}
+        when {
+            reason.contains("NFC", ignoreCase = true) -> {
+                builder.setNegativeButton("Open NFC settings") { _, _ ->
+                    try { startActivity(Intent(Settings.ACTION_NFC_SETTINGS)) } catch (_: Exception) {}
+                }
+            }
+            reason.contains("Location", ignoreCase = true) -> {
+                builder.setNegativeButton("Enable location") { _, _ ->
+                    try { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) } catch (_: Exception) {}
+                }
             }
         }
-
         builder.show()
     }
     // ----------------------------------------------------
 
     private fun startPosFlow() {
         // ✅ Gate Tap-to-Pay on device eligibility (NB55 etc.)
-        tapToPayEligibleReason()?.let { reason ->
+        val reason = tapToPayEligibleReason()
+        if (reason != null) {
             Log.e("TPOS_TTP", "Tap to Pay not available on this device: $reason")
+            // Offer Play Services resolution if applicable
+            if (reason.startsWith("Google Play services") && maybeResolvePlayServices()) {
+                // A Play Services resolution dialog is shown; user returns here later.
+                return
+            }
             showUnsupportedDialog(reason)
             return
         }
@@ -275,14 +324,27 @@ class MainActivity : ComponentActivity() {
             terminalInitialized = true
         }
 
+        // Reset discovery/connection state and schedule a timeout
+        discoveryStarted = false
+        readerConnected = false
+        postDiscoveryTimeout()
+
         ensurePermissions(
             onGranted = {
                 discoverAndConnect(
-                    onReady = { Log.i("TPOS_WS", "TapToPay reader READY") },
-                    onError = { e -> Log.e("TPOS_WS", "Startup connect error: $e") }
+                    onReady = {
+                        readerConnected = true
+                        Log.i("TPOS_WS", "TapToPay reader READY")
+                    },
+                    onError = { e ->
+                        Log.e("TPOS_WS", "Startup connect error: $e")
+                        showUnsupportedDialog(e)
+                    }
                 )
             },
-            onDenied = { e -> Log.e("TPOS_WS", "Startup permissions denied: $e") }
+            onDenied = { e ->
+                Log.e("TPOS_WS", "Startup permissions denied: $e")
+            }
         )
 
         // EXACTLY like the old flow: start WS then launch TWA
@@ -290,6 +352,21 @@ class MainActivity : ComponentActivity() {
 
         if (twaLauncher == null) twaLauncher = TwaLauncher(this)
         twaLauncher?.launch(Uri.parse(tposUrl()))
+    }
+
+    private fun postDiscoveryTimeout() {
+        if (discoveryTimeoutPosted) return
+        discoveryTimeoutPosted = true
+        mainHandler.postDelayed({
+            discoveryTimeoutPosted = false
+            if (!readerConnected) {
+                val msg = "No Tap to Pay reader discovered/connected in time"
+                Log.e("TPOS_TTP", msg)
+                showUnsupportedDialog(
+                    "$msg. Possible causes: device fails attestation, Play Services outdated, or Tap to Pay not supported on this model."
+                )
+            }
+        }, 10_000L) // 10s
     }
 
     data class TapToPayMsg(
@@ -350,18 +427,26 @@ class MainActivity : ComponentActivity() {
                         Log.i("TPOS_WS", "Ignoring WS: already collecting")
                         return@runOnUiThread
                     }
-                    val readerConnected = Terminal.getInstance().connectedReader != null
-                    if (readerConnected) {
+                    val connected = Terminal.getInstance().connectedReader != null
+                    if (connected) {
                         beginCharge(msg!!)
                     } else {
                         ensurePermissions(
                             onGranted = {
                                 discoverAndConnect(
-                                    onReady = { beginCharge(msg!!) },
-                                    onError = { e -> Log.e("TPOS_WS", "Reader not ready: $e") }
+                                    onReady = {
+                                        readerConnected = true
+                                        beginCharge(msg!!)
+                                    },
+                                    onError = { e ->
+                                        Log.e("TPOS_WS", "Reader not ready: $e")
+                                        showUnsupportedDialog(e)
+                                    }
                                 )
                             },
-                            onDenied = { e -> Log.e("TPOS_WS", "Permissions denied: $e") }
+                            onDenied = { e ->
+                                Log.e("TPOS_WS", "Permissions denied: $e")
+                            }
                         )
                     }
                 }
@@ -477,9 +562,10 @@ class MainActivity : ComponentActivity() {
             discoveryConfig,
             object : DiscoveryListener {
                 override fun onUpdateDiscoveredReaders(readers: List<Reader>) {
+                    discoveryStarted = true
                     Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
                     if (readers.isEmpty()) {
-                        Log.w("TPOS_TTP", "No Tap to Pay reader discovered (device likely not eligible).")
+                        Log.w("TPOS_TTP", "No Tap to Pay reader discovered yet.")
                         return
                     }
                     val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
@@ -489,6 +575,7 @@ class MainActivity : ComponentActivity() {
                     )
                     Terminal.getInstance().connectReader(readers.first(), cfg, object : ReaderCallback {
                         override fun onSuccess(reader: Reader) {
+                            readerConnected = true
                             Log.i("TPOS_WS", "Connected to reader: ${reader.serialNumber}")
                             onReady()
                         }
@@ -500,7 +587,10 @@ class MainActivity : ComponentActivity() {
                 }
             },
             object : Callback {
-                override fun onSuccess() { Log.i("TPOS_WS", "Discovery started") }
+                override fun onSuccess() {
+                    discoveryStarted = true
+                    Log.i("TPOS_WS", "Discovery started")
+                }
                 override fun onFailure(e: TerminalException) {
                     Log.e("TPOS_WS", "Discovery failed [${e.errorCode}]: ${e.errorMessage}", e)
                     onError("Discovery failed [${e.errorCode}]: ${e.errorMessage}")
