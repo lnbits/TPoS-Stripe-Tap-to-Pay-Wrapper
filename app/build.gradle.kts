@@ -57,6 +57,7 @@ android {
 }
 
 dependencies {
+    implementation("com.google.android.gms:play-services-base:18.4.0")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("com.google.zxing:core:3.5.1")
     implementation("com.google.androidbrowserhelper:androidbrowserhelper:2.5.0")

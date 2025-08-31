@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.widget.Button
@@ -40,6 +41,12 @@ import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 // QR (ZXing modern API)
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+
+// NEW: eligibility helpers
+import android.app.AlertDialog
+import android.nfc.NfcAdapter
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 
 import java.io.IOException
 import androidx.core.net.toUri
@@ -195,7 +202,69 @@ class MainActivity : ComponentActivity() {
         }.getOrDefault(false)
     }
 
+    // ---------- Tap to Pay eligibility helpers ----------
+    private fun hasPlayServices(): Pair<Boolean, String?> {
+        val gaa = GoogleApiAvailability.getInstance()
+        val code = gaa.isGooglePlayServicesAvailable(this)
+        val ok = (code == ConnectionResult.SUCCESS)
+        val msg = if (ok) null else gaa.getErrorString(code)
+        return ok to msg
+    }
+
+    private fun hasPlayStore(): Boolean {
+        return try {
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                packageManager.getPackageInfo("com.android.vending", PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo("com.android.vending", 0)
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun hasNfcEnabled(): Boolean =
+        NfcAdapter.getDefaultAdapter(this)?.isEnabled == true
+
+    /** @return reason string if NOT eligible, else null */
+    private fun tapToPayEligibleReason(): String? {
+        val (gmsOk, gmsMsg) = hasPlayServices()
+        if (!gmsOk) return "Google Play services not available: ${gmsMsg ?: "unknown error"}"
+        if (!hasPlayStore()) return "Google Play Store app not installed"
+        if (!hasNfcEnabled()) return "NFC is missing or turned off"
+        return null
+    }
+
+    private fun showUnsupportedDialog(reason: String) {
+        val builder = AlertDialog.Builder(this)
+            .setTitle("Device not supported")
+            .setMessage(
+                "Stripe Tap to Pay can't run on this device.\n\n" +
+                        "Reason: $reason\n\n" +
+                        "Use a supported phone (e.g., Samsung/Pixel) or pair an external Stripe reader."
+            )
+            .setPositiveButton("OK", null)
+
+        if (reason.contains("NFC", ignoreCase = true)) {
+            builder.setNegativeButton("Open NFC settings") { _, _ ->
+                try { startActivity(Intent(Settings.ACTION_NFC_SETTINGS)) } catch (_: Exception) {}
+            }
+        }
+
+        builder.show()
+    }
+    // ----------------------------------------------------
+
     private fun startPosFlow() {
+        // ✅ Gate Tap-to-Pay on device eligibility (NB55 etc.)
+        tapToPayEligibleReason()?.let { reason ->
+            Log.e("TPOS_TTP", "Tap to Pay not available on this device: $reason")
+            showUnsupportedDialog(reason)
+            return
+        }
+
         if (!terminalInitialized) {
             Terminal.initTerminal(
                 applicationContext,
@@ -409,7 +478,10 @@ class MainActivity : ComponentActivity() {
             object : DiscoveryListener {
                 override fun onUpdateDiscoveredReaders(readers: List<Reader>) {
                     Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
-                    if (readers.isEmpty()) return
+                    if (readers.isEmpty()) {
+                        Log.w("TPOS_TTP", "No Tap to Pay reader discovered (device likely not eligible).")
+                        return
+                    }
                     val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
                         locationId = cfgLocId(),
                         autoReconnectOnUnexpectedDisconnect = true,
@@ -421,8 +493,8 @@ class MainActivity : ComponentActivity() {
                             onReady()
                         }
                         override fun onFailure(e: TerminalException) {
-                            Log.e("TPOS_WS", "Connect failed: ${e.errorMessage}")
-                            onError("Connect failed: ${e.errorMessage}")
+                            Log.e("TPOS_WS", "Connect failed [${e.errorCode}]: ${e.errorMessage}", e)
+                            onError("Connect failed [${e.errorCode}]: ${e.errorMessage}")
                         }
                     })
                 }
@@ -430,8 +502,8 @@ class MainActivity : ComponentActivity() {
             object : Callback {
                 override fun onSuccess() { Log.i("TPOS_WS", "Discovery started") }
                 override fun onFailure(e: TerminalException) {
-                    Log.e("TPOS_WS", "Discovery failed: ${e.errorMessage}")
-                    onError("Discovery failed: ${e.errorMessage}")
+                    Log.e("TPOS_WS", "Discovery failed [${e.errorCode}]: ${e.errorMessage}", e)
+                    onError("Discovery failed [${e.errorCode}]: ${e.errorMessage}")
                 }
             }
         )
@@ -450,15 +522,15 @@ class MainActivity : ComponentActivity() {
                             override fun onSuccess(processed: PaymentIntent) =
                                 onOk(processed.id ?: "unknown_intent_id")
                             override fun onFailure(e: TerminalException) =
-                                onFail("Confirm failed: ${e.errorMessage}")
+                                onFail("Confirm failed [${e.errorCode}]: ${e.errorMessage}")
                         })
                     }
                     override fun onFailure(e: TerminalException) =
-                        onFail("Collect failed: ${e.errorMessage}")
+                        onFail("Collect failed [${e.errorCode}]: ${e.errorMessage}")
                 })
             }
             override fun onFailure(e: TerminalException) =
-                onFail("Retrieve failed: ${e.errorMessage}")
+                onFail("Retrieve failed [${e.errorCode}]: ${e.errorMessage}")
         })
     }
 }
