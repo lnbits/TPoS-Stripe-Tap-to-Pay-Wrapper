@@ -91,11 +91,6 @@ class MainActivity : ComponentActivity() {
     private var readerConnected = false
     private var discoveryTimeoutPosted = false
 
-    // NEW: connection + foreground control
-    @Volatile private var connecting = false
-    @Volatile private var appInForeground = false
-    @Volatile private var pendingMsg: TapToPayMsg? = null
-
     // ---- permission launcher (register once)
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     private var onPermsGranted: (() -> Unit)? = null
@@ -120,7 +115,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_onboarding)
 
-        // Register once here (fixes the late-registration crash)
+        // Register runtime permission launcher
         permissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) { grants ->
@@ -132,57 +127,9 @@ class MainActivity : ComponentActivity() {
         }
 
         initOnboardingUi()
-        requestCorePermissionsOnStart() // prompt at start
 
-        // NOTE: Do NOT auto-show registration. It will be shown via "Continue to saved POS".
-        // Handle a possible deeplink like tpos://pay
-        intent?.data?.let { maybeHandleDeepLink(it) }
-    }
-
-    override fun onNewIntent(intent: Intent?) {
-        super.onNewIntent(intent)
-        intent?.data?.let { maybeHandleDeepLink(it) }
-    }
-
-    private fun maybeHandleDeepLink(uri: Uri) {
-        // Accept schemes like tpos://pay (host = pay) or tpos://collect
-        if (uri.scheme.equals("tpos", true)) {
-            Log.i("TPOS_DEEPLINK", "Received deeplink: $uri — launching overlay if a payment is queued")
-            // If a payment is already queued from WS, start it via overlay.
-            pendingMsg?.let {
-                if (!busy && !it.client_secret.isNullOrBlank()) {
-                    busy = true
-                    val i = Intent(this, PaymentOverlayActivity::class.java)
-                        .putExtra("client_secret", it.client_secret!!)
-                        .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-                    startActivity(i)
-                    pendingMsg = null
-                    mainHandler.postDelayed({ busy = false }, 500)
-                }
-            }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        appInForeground = true
-        // If a payment arrived while app was backgrounded (TWA on top), run it via overlay now
-        pendingMsg?.let {
-            if (!busy && !it.client_secret.isNullOrBlank()) {
-                busy = true
-                val i = Intent(this, PaymentOverlayActivity::class.java)
-                    .putExtra("client_secret", it.client_secret!!)
-                    .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-                startActivity(i)
-                pendingMsg = null
-                mainHandler.postDelayed({ busy = false }, 500)
-            }
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        appInForeground = false
+        // NOTE: Do NOT auto-show registration; it opens only when user taps "Continue".
+        // If you kept a tpos:// intent filter, we don't need to handle it explicitly here.
     }
 
     override fun onDestroy() {
@@ -191,32 +138,6 @@ class MainActivity : ComponentActivity() {
         ws = null
         twaLauncher?.destroy()
         twaLauncher = null
-    }
-
-    // ---------- UI z-order helpers ----------
-    private fun bringAppToForeground() {
-        try {
-            val i = Intent(this, MainActivity::class.java)
-            i.addFlags(
-                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP
-            )
-            startActivity(i)
-            Log.i("TPOS_UI", "Requested app to foreground")
-        } catch (t: Throwable) {
-            Log.w("TPOS_UI", "Failed to bring app to foreground", t)
-        }
-    }
-
-    private fun bringTwaToFront() {
-        try {
-            if (twaLauncher == null) twaLauncher = TwaLauncher(this)
-            twaLauncher?.launch(Uri.parse(tposUrl()))
-            Log.i("TPOS_UI", "Brought TWA to foreground")
-        } catch (t: Throwable) {
-            Log.w("TPOS_UI", "Failed to bring TWA to foreground", t)
-        }
     }
 
     private fun restartTposWebSocket(afterMs: Long = 600L) {
@@ -259,7 +180,7 @@ class MainActivity : ComponentActivity() {
                 .setPrompt("Scan Pairing Link")
                 .setBeepEnabled(false)
                 .setOrientationLocked(true)
-                .setCaptureActivity(PortraitCaptureActivity::class.java) // force portrait
+                .setCaptureActivity(PortraitCaptureActivity::class.java)
             qrLauncher.launch(opts)
         }
 
@@ -506,69 +427,12 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    // Ensure connection then begin Tap to Pay (fallback path; overlay is preferred)
-    private fun ensureConnectedAndBegin(msg: TapToPayMsg) {
-        val connected = try { Terminal.getInstance().connectedReader != null } catch (_: Throwable) { false }
-        if (connected) {
-            beginCharge(msg)
-            return
-        }
-        ensurePermissions(
-            onGranted = {
-                discoverAndConnect(
-                    onReady = {
-                        readerConnected = true
-                        beginCharge(msg)
-                    },
-                    onError = { e ->
-                        Log.e("TPOS_WS", "Reader not ready: $e")
-                        showUnsupportedDialog(e)
-                    }
-                )
-            },
-            onDenied = { e ->
-                Log.e("TPOS_WS", "Permissions denied: $e")
-            }
-        )
-    }
-
-    private fun beginCharge(msg: TapToPayMsg) {
-        val clientSecret = msg.client_secret!!
-        busy = true
-        Log.i("TPOS_WS", "Starting Tap-to-Pay for PI ${msg.payment_intent_id}")
-
-        collectAndProcess(
-            clientSecret,
-            onOk  = { id ->
-                Log.i("TPOS_WS", "✅ Paid: $id")
-                busy = false
-                restartTposWebSocket(afterMs = 500L)
-                // No UI switching here; overlay path handles UX in normal flow.
-            },
-            onFail = { e  ->
-                Log.e("TPOS_WS", "❌ $e")
-                busy = false
-                restartTposWebSocket(afterMs = 800L)
-                // No UI switching here either.
-            }
-        )
-    }
-
-    // ---- request perms on start
-    private fun requestCorePermissionsOnStart() {
-        ensurePermissions(
-            onGranted = { Log.i("TPOS_PERM", "Startup permissions granted") },
-            onDenied  = { Log.w("TPOS_PERM", it) }
-        )
-    }
-
-    // Quick runtime-permission check for lint + safety
+    // ---- request perms helper (kept for re-use inside registration)
     private fun hasAllRuntimePerms(): Boolean {
         val want = mutableListOf(
             Manifest.permission.CAMERA,
             Manifest.permission.ACCESS_FINE_LOCATION
         )
-        // Android 12+ nearby devices
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             want += Manifest.permission.BLUETOOTH_SCAN
             want += Manifest.permission.BLUETOOTH_CONNECT
@@ -576,22 +440,18 @@ class MainActivity : ComponentActivity() {
         return want.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
     }
 
-    // ---- reusable permission checker
     private fun ensurePermissions(onGranted: () -> Unit, onDenied: (String) -> Unit) {
         val need = mutableListOf<String>()
         val api = android.os.Build.VERSION.SDK_INT
 
-        // Camera for QR scan
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
             need += Manifest.permission.CAMERA
-
-        if (api >= 31) { // Android 12+
+        if (api >= 31) {
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED)
                 need += Manifest.permission.BLUETOOTH_SCAN
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
                 need += Manifest.permission.BLUETOOTH_CONNECT
         }
-        // Many devices still gate discovery behind Location
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
             need += Manifest.permission.ACCESS_FINE_LOCATION
 
@@ -632,8 +492,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ---- DISCOVER + CONNECT with progress + watchdog ----
-    @SuppressLint("MissingPermission") // guarded by hasAllRuntimePerms + try/catch
+    // ---- DISCOVER + CONNECT with progress + watchdog (for registration) ----
+    @SuppressLint("MissingPermission")
     private fun discoverAndConnect(
         onReady: () -> Unit,
         onError: (String) -> Unit,
@@ -657,55 +517,36 @@ class MainActivity : ComponentActivity() {
                         onUpdate?.invoke(readers.size)
                         Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
 
-                        // Already connected from a prior session? Treat as registered.
                         Terminal.getInstance().connectedReader?.let {
                             onReady()
                             return
                         }
-
                         if (readers.isEmpty()) return
 
-                        // Start a watchdog that polls for connectedReader in case callbacks are missed
                         startConnectedReaderWatchdog(onReady)
 
-                        if (connecting) return
-                        connecting = true
-
-                        // Connect on the UI thread
-                        runOnUiThread {
-                            val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
-                                locationId = cfgLocId(),
-                                autoReconnectOnUnexpectedDisconnect = true,
-                                tapToPayReaderListener = null
-                            )
-                            Terminal.getInstance().connectReader(readers.first(), cfg, object : ReaderCallback {
-                                override fun onSuccess(reader: Reader) {
-                                    connecting = false
-                                    readerConnected = true
-                                    Log.i("TPOS_WS", "Connected to reader: ${reader.serialNumber}")
-                                    onReady()
-                                }
+                        val cfg = ConnectionConfiguration.TapToPayConnectionConfiguration(
+                            locationId = cfgLocId(),
+                            autoReconnectOnUnexpectedDisconnect = true,
+                            tapToPayReaderListener = null
+                        )
+                        Terminal.getInstance().connectReader(
+                            readers.first(),
+                            cfg,
+                            object : ReaderCallback {
+                                override fun onSuccess(reader: Reader) { onReady() }
                                 override fun onFailure(e: TerminalException) {
-                                    connecting = false
                                     val msg = "Connect failed [${e.errorCode}]: ${e.errorMessage}"
                                     Log.e("TPOS_WS", msg, e)
-
-                                    // If SDK exposes a connected reader after failure (rare), allow continue
-                                    Terminal.getInstance().connectedReader?.let {
-                                        onReady()
-                                        return
-                                    }
+                                    Terminal.getInstance().connectedReader?.let { onReady(); return }
                                     onError(msg)
                                 }
-                            })
-                        }
+                            }
+                        )
                     }
                 },
                 object : Callback {
-                    override fun onSuccess() {
-                        discoveryStarted = true
-                        Log.i("TPOS_WS", "Discovery started")
-                    }
+                    override fun onSuccess() { discoveryStarted = true }
                     override fun onFailure(e: TerminalException) {
                         val msg = "Discovery failed [${e.errorCode}]: ${e.errorMessage}"
                         Log.e("TPOS_WS", msg, e)
@@ -720,47 +561,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startConnectedReaderWatchdog(onReady: () -> Unit) {
-        // Poll every 500ms for up to 12s to catch late connect signals
         val start = System.currentTimeMillis()
         fun tick() {
             val cr = try { Terminal.getInstance().connectedReader } catch (_: Throwable) { null }
-            if (cr != null) {
-                Log.i("TPOS_WS", "Watchdog detected connectedReader; proceeding")
-                onReady()
-                return
-            }
-            if (System.currentTimeMillis() - start > 12_000L) {
-                Log.w("TPOS_WS", "Watchdog timeout; still no connectedReader")
-                return
-            }
+            if (cr != null) { onReady(); return }
+            if (System.currentTimeMillis() - start > 12_000L) return
             mainHandler.postDelayed({ tick() }, 500L)
         }
         mainHandler.postDelayed({ tick() }, 500L)
-    }
-
-    private fun collectAndProcess(
-        clientSecret: String,
-        onOk: (String) -> Unit,
-        onFail: (String) -> Unit
-    ) {
-        Terminal.getInstance().retrievePaymentIntent(clientSecret, object : PaymentIntentCallback {
-            override fun onSuccess(pi: PaymentIntent) {
-                Terminal.getInstance().collectPaymentMethod(pi, object : PaymentIntentCallback {
-                    override fun onSuccess(collected: PaymentIntent) {
-                        Terminal.getInstance().confirmPaymentIntent(collected, object : PaymentIntentCallback {
-                            override fun onSuccess(processed: PaymentIntent) =
-                                onOk(processed.id ?: "unknown_intent_id")
-                            override fun onFailure(e: TerminalException) =
-                                onFail("Confirm failed [${e.errorCode}]: ${e.errorMessage}")
-                        })
-                    }
-                    override fun onFailure(e: TerminalException) =
-                        onFail("Collect failed [${e.errorCode}]: ${e.errorMessage}")
-                })
-            }
-            override fun onFailure(e: TerminalException) =
-                onFail("Retrieve failed [${e.errorCode}]: ${e.errorMessage}")
-        })
     }
 
     // ---- REGISTRATION MODAL (pre-page) ----
@@ -813,7 +621,6 @@ class MainActivity : ComponentActivity() {
 
         dlg.show()
 
-        // If config is missing, prompt for pairing and bail early (prevents empty locId errors)
         if (!hasSavedConfig()) {
             tvTitle.text = "Pair device to continue"
             tvStep.text = "Waiting for pairing"
@@ -822,16 +629,6 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // If we’re already connected from a previous run, allow Continue immediately
-        if (terminalInitialized) {
-            try {
-                Terminal.getInstance().connectedReader?.let { cr ->
-                    onRegistered(cr)
-                }
-            } catch (_: Throwable) { /* Terminal may not be initialized yet */ }
-        }
-
-        // Kick off the checks + discovery + connect
         val reason = tapToPayEligibleReason()
         if (reason != null) { onFail("Device not eligible: $reason"); return }
 
@@ -846,10 +643,8 @@ class MainActivity : ComponentActivity() {
             terminalInitialized = true
         }
 
-        // Optional: same 10s timeout guard as before
         discoveryStarted = false
         readerConnected = false
-        connecting = false
         postDiscoveryTimeout()
 
         ensurePermissions(
@@ -858,11 +653,7 @@ class MainActivity : ComponentActivity() {
                 discoverAndConnect(
                     onReady = {
                         val cr = Terminal.getInstance().connectedReader
-                        if (cr != null) {
-                            onRegistered(cr)
-                        } else {
-                            onFail("Connected, but reader not available")
-                        }
+                        if (cr != null) onRegistered(cr) else onFail("Connected, but reader not available")
                     },
                     onError = { e -> onFail(e) },
                     onUpdate = { count ->

@@ -43,57 +43,57 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.LNbitsTapToPay">
 
-        <!-- Main activity: launcher + tpos:// deeplinks -->
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:label="@string/app_name"
-            android:theme="@style/Theme.LNbitsTapToPay">
+    <!-- Main activity: launcher + tpos:// deeplinks -->
+    <activity
+        android:name=".MainActivity"
+        android:exported="true"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.LNbitsTapToPay"
+        android:launchMode="singleTop">
 
-            <!-- Launcher -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
+        <!-- Launcher -->
+        <intent-filter>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent-filter>
 
-            <!-- Allow any tpos://* host (generic) -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="tpos" />
-            </intent-filter>
+        <!-- Allow any tpos://* host (generic) -->
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="tpos" />
+        </intent-filter>
 
-            <!-- Explicit hosts you may use -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="tpos" android:host="pay" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="tpos" android:host="collect" />
-            </intent-filter>
-        </activity>
+        <!-- Explicit hosts you may use -->
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="tpos" android:host="pay" />
+        </intent-filter>
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="tpos" android:host="collect" />
+        </intent-filter>
+    </activity>
 
-        <!-- ZXing portrait capture helper -->
-        <activity
-            android:name=".PortraitCaptureActivity"
-            android:exported="false"
-            android:screenOrientation="portrait"
-            android:stateNotNeeded="true"
-            android:windowSoftInputMode="stateHidden"
-            tools:replace="screenOrientation" />
+    <!-- ZXing portrait capture helper -->
+    <activity
+        android:name=".PortraitCaptureActivity"
+        android:exported="false"
+        android:screenOrientation="portrait"
+        android:stateNotNeeded="true"
+        android:windowSoftInputMode="stateHidden" />
 
-        <!-- Transparent overlay for Tap-to-Pay flow -->
-        <activity
-            android:name=".PaymentOverlayActivity"
-            android:exported="false"
-            android:theme="@style/Theme.TapToPay.Transparent"
-            android:excludeFromRecents="true"
-            android:finishOnTaskLaunch="true" />
+    <!-- Transparent overlay for Tap-to-Pay flow -->
+    <activity
+        android:name=".PaymentOverlayActivity"
+        android:exported="false"
+        android:theme="@style/Theme.TapToPay.Transparent"
+        android:excludeFromRecents="true"
+        android:finishOnTaskLaunch="true" />
     </application>
 </manifest>
