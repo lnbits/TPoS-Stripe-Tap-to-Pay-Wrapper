@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:id="@+id/tvRegTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Registering…"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:paddingBottom="8dp" />
+
+    <TextView
+        android:id="@+id/tvRegStep"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Step info"
+        android:paddingBottom="4dp" />
+
+    <TextView
+        android:id="@+id/tvRegDetail"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Details"
+        android:paddingBottom="16dp" />
+
+    <Button
+        android:id="@+id/btnRegContinue"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Continue"
+        android:enabled="false" />
+
+    <Button
+        android:id="@+id/btnRegClose"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Cancel" />
+</LinearLayout>
+

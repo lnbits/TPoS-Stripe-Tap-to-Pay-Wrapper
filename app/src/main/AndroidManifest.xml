@@ -2,26 +2,35 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.NFC" />
+    <!-- Network / camera -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature android:name="android.hardware.camera" />
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- Location (often required for discovery) -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- NFC (install-time, no runtime prompt). Require NFC for Tap to Pay. -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="true" />
 
-    <!-- Nearby devices (Android 12+) -->
+    <!-- Location (often required for discovery on some OEMs) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Optional legacy coarse for very old devices -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="28" />
+
+    <!-- Nearby devices (Android 12+). DO NOT cap with maxSdkVersion. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"
-        android:maxSdkVersion="34" />
+        tools:targetApi="s" />
     <uses-permission
         android:name="android.permission.BLUETOOTH_CONNECT"
-        android:maxSdkVersion="34" />
+        tools:targetApi="s" />
+    <!-- Only if you ever advertise (not needed for Stripe TTP):
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" tools:targetApi="s" />
+    -->
 
-    <!-- NFC is required for Tap to Pay -->
-    <uses-feature android:name="android.hardware.nfc" android:required="true" />
+    <!-- Legacy Bluetooth for < Android 12 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
 
     <application
         android:usesCleartextTraffic="true"
@@ -34,19 +43,17 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.LNbitsTapToPay">
 
-        <!-- Your main activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.LNbitsTapToPay" >
+            android:theme="@style/Theme.LNbitsTapToPay">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- ZXing capture activity locked to portrait -->
         <activity
             android:name=".PortraitCaptureActivity"
             android:exported="false"
