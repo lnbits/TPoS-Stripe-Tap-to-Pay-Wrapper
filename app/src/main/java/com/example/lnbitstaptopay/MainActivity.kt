@@ -72,7 +72,7 @@ class MainActivity : ComponentActivity() {
 
     private fun tposUrl() = "https://${cfgOrigin()}/tpos/${cfgTposId()}"
     private fun wsUrl()   = "wss://${cfgOrigin()}/api/v1/ws/${cfgTposId()}"
-    private fun stripeBase() = "https://${cfgOrigin()}/api/v1/fiat/stripe/terminal"
+    private fun stripeBase() = "https://${cfgOrigin()}/api/v1/fiat/stripe"
 
     private val http = OkHttpClient()
     private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
