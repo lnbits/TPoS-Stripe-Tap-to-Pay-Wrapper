@@ -14,6 +14,6 @@
 
 #### 5. Click the QR for the PoS record and add a Stripe terminal location ID and ACL token.
 
-<img width="300" src="https://github.com/user-attachments/assets/bdad19d0-4853-4008-8ce8-585051958ac6" />
+<img width="300" src="https://github.com/user-attachments/assets/966fec79-37a0-49da-bc9d-4458af275dda" />
 
 #### 6. Scan the QR in the TPoS Wrapper app.<br/>
