@@ -31,7 +31,7 @@
 
 <a href="https://x.com/lnbits/status/1974218832077054315">https://x.com/lnbits/status/1974218832077054315</a>
 
-> ☝️ please like/share/subscribe. It's the easiest way to contribute.
+> ☝️ Please like/share/subscribe, it's the easiest way to contribute, and we really appreciate it.
 
 ## Getting Started
 
