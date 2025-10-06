@@ -123,8 +123,11 @@ LNbits empowers developers and merchants with modular, open-source tools for bui
   <a href="https://news.lnbits.com/" target="_blank">
     <img src="https://img.shields.io/badge/Read-LNbits%20News-F97316?logo=rss&logoColor=white&labelColor=C2410C" alt="LNbits News">
   </a>
+  <a href="https://extensions.lnbits.com/" target="_blank" style="margin: 0 10px;">
+  <img
+    src="https://img.shields.io/badge/Explore-LNbits%20Extensions-10B981?logo=puzzle-piece&logoColor=white&labelColor=065F46" alt="LNbits Extensions">
+  </a>
 </p>
-
 </div>
 
 <hr style="margin: 28px 0; border: 0; border-top: 1px solid #e5e7eb;" />
