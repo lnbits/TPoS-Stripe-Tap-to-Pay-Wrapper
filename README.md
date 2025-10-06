@@ -27,6 +27,10 @@
 
 <a href="https://www.youtube.com/watch?v=8w4-VQ3WFrk"> <img src="https://img.youtube.com/vi/8w4-VQ3WFrk/hqdefault.jpg" width="400"></a>
 
+<a href="nostr.com/nevent1qqs2wuwfryhwjmzg64tkvh907x74r979wak8xr53mkhkwtphy648r2gpzamhxue69uhhyetvv9ujumn0wd68ytnzv9hxgtczyrqlcam37hayrr7n43yjyxsc7xd59n9h5e3a4rcyewlkczxgp5stzqcyqqqqqqgwkkndq">nostr.com/nevent1qqs2wuwfryhwjmzg64tkvh907x74r979wak8xr53mkhkwtphy648r2gpzamhxue69uhhyetvv9ujumn0wd68ytnzv9hxgtczyrqlcam37hayrr7n43yjyxsc7xd59n9h5e3a4rcyewlkczxgp5stzqcyqqqqqqgwkkndq</a>
+
+<a href="https://x.com/lnbits/status/1974218832077054315">https://x.com/lnbits/status/1974218832077054315</a>
+
 ## Getting Started
 
 Follow these steps for a clean installation of the LNbits Stripe Setup.
