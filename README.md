@@ -27,7 +27,7 @@
 
 <a href="https://www.youtube.com/watch?v=8w4-VQ3WFrk"> <img src="https://github.com/user-attachments/assets/edb0059b-e950-44c7-ac86-4aeac979b18b" width="400"></a>
 
-<a href="https://nostr.com/nevent1qqs2wuwfryhwjmzg64tkvh907x74r979wak8xr53mkhkwtphy648r2gpzamhxue69uhhyetvv9ujumn0wd68ytnzv9hxgtczyrqlcam37hayrr7n43yjyxsc7xd59n9h5e3a4rcyewlkczxgp5stzqcyqqqqqqgwkkndq">nostr.com/nevent1qqs2wuwfryhwjmzg64tkvh907x74r979wak8xr53mkhkwtphy648r2gpzamhxue69uhhyetvv9ujumn0wd68ytnzv9hxgtczyrqlcam37hayrr7n43yjyxsc7xd59n9h5e3a4rcyewlkczxgp5stzqcyqqqqqqgwkkndq</a>
+<a href="https://nostr.com/nevent1qqs2wuwfryhwjmzg64tkvh907x74r979wak8xr53mkhkwtphy648r2gpzamhxue69uhhyetvv9ujumn0wd68ytnzv9hxgtczyrqlcam37hayrr7n43yjyxsc7xd59n9h5e3a4rcyewlkczxgp5stzqcyqqqqqqgwkkndq">https://nostr.com/nevent1qqs2wuwfryhwjmzg64tkvh907x74r979wak8xr53mkhkwtphy648r2gpzamhxue69uhhyetvv9ujumn0wd68ytnzv9hxgtczyrqlcam37hayrr7n43yjyxsc7xd59n9h5e3a4rcyewlkczxgp5stzqcyqqqqqqgwkkndq</a>
 
 <a href="https://x.com/lnbits/status/1974218832077054315">https://x.com/lnbits/status/1974218832077054315</a>
 
