@@ -23,13 +23,9 @@
 
 
 
-## Demo
+## Posts
 
-[![Watch the demo on YouTube](https://img.youtube.com/vi/8w4-VQ3WFrk/hqdefault.jpg)](https://www.youtube.com/watch?v=8w4-VQ3WFrk "TPoS Extension Update: Fiat Tap-to-Pay, Sell Bitcoins from the PoS")
-
-*Click the thumbnail to watch the Full demo.*
-
-
+<a href="https://www.youtube.com/watch?v=8w4-VQ3WFrk"> <img src="https://img.youtube.com/vi/8w4-VQ3WFrk/hqdefault.jpg" width="400"></a>
 
 ## Getting Started
 
