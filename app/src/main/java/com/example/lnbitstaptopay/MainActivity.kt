@@ -20,7 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.google.androidbrowserhelper.trusted.TwaLauncher
 
-// Stripe Terminal SDK (4.6.0)
+// Stripe Terminal SDK (5.1.1)
 import com.stripe.stripeterminal.Terminal
 import com.stripe.stripeterminal.external.callable.*
 import com.stripe.stripeterminal.external.models.*
@@ -312,11 +312,12 @@ class MainActivity : ComponentActivity() {
         }
 
         if (!terminalInitialized) {
-            Terminal.initTerminal(
+            Terminal.init(
                 applicationContext,
                 LogLevel.VERBOSE,
                 tokenProvider(),
-                object : TerminalListener {}
+                object : TerminalListener {},
+                null
             )
             terminalInitialized = true
         }
@@ -634,11 +635,12 @@ class MainActivity : ComponentActivity() {
 
         if (!terminalInitialized) {
             onPhase("Initializing Stripe SDK")
-            Terminal.initTerminal(
+            Terminal.init(
                 applicationContext,
                 LogLevel.VERBOSE,
                 tokenProvider(),
-                object : TerminalListener {}
+                object : TerminalListener {},
+                null
             )
             terminalInitialized = true
         }

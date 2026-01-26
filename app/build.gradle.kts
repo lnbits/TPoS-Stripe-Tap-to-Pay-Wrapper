@@ -61,8 +61,8 @@ dependencies {
     implementation("com.google.androidbrowserhelper:androidbrowserhelper:2.6.2")
 
     // Stripe Terminal (Tap to Pay)
-    implementation("com.stripe:stripeterminal-taptopay:4.6.0")
-    implementation("com.stripe:stripeterminal-core:4.6.0")
+    implementation("com.stripe:stripeterminal-taptopay:5.1.1")
+    implementation("com.stripe:stripeterminal-core:5.1.1")
 
     // HTTP + JSON
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
