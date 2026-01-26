@@ -1,6 +1,7 @@
 package com.example.lnbitstaptopay
 
 import android.Manifest
+import android.app.AlertDialog
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -22,6 +23,8 @@ class PaymentOverlayActivity : ComponentActivity() {
 
     private val prefs by lazy { getSharedPreferences("tpos_prefs", MODE_PRIVATE) }
     private fun cfgLocId()  = prefs.getString("locId", "")!!
+    private fun cfgSimulated() = prefs.getBoolean("simulated", BuildConfig.DEBUG)
+    private var errorShown = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -33,14 +36,14 @@ class PaymentOverlayActivity : ComponentActivity() {
         val clientSecret = intent.getStringExtra("client_secret")
         if (clientSecret.isNullOrBlank()) {
             Log.e("TPOS_OVERLAY", "No client_secret in intent; finishing")
-            finish()
+            showErrorAndFinish("Missing payment secret from backend.")
             return
         }
 
         // Permissions should already be granted by MainActivity, but double-check
         if (!hasAllRuntimePerms()) {
             Log.e("TPOS_OVERLAY", "Missing runtime permissions; finishing")
-            finish()
+            showErrorAndFinish("Missing required permissions for Tap to Pay.")
             return
         }
 
@@ -53,9 +56,9 @@ class PaymentOverlayActivity : ComponentActivity() {
                     Log.i("TPOS_OVERLAY", "Paid: $it")
                     finish() // reveal TWA underneath
                 },
-                onFail = {
-                    Log.e("TPOS_OVERLAY", it)
-                    finish() // reveal TWA so web POS can show error state
+                onFail = { msg ->
+                    Log.e("TPOS_OVERLAY", msg)
+                    showErrorAndFinish(msg)
                 }
             )
         }
@@ -78,7 +81,7 @@ class PaymentOverlayActivity : ComponentActivity() {
         if (connected) { onReady(); return }
 
         val discoveryConfig = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(
-            isSimulated = BuildConfig.DEBUG
+            isSimulated = cfgSimulated()
         )
 
         try {
@@ -100,8 +103,9 @@ class PaymentOverlayActivity : ComponentActivity() {
                                     onReady()
                                 }
                                 override fun onFailure(e: TerminalException) {
-                                    Log.e("TPOS_OVERLAY", "Connect failed [${e.errorCode}]: ${e.errorMessage}")
-                                    finish()
+                                    val msg = "Connect failed [${e.errorCode}]: ${e.errorMessage}"
+                                    Log.e("TPOS_OVERLAY", msg)
+                                    showErrorAndFinish(msg)
                                 }
                             }
                         )
@@ -110,14 +114,16 @@ class PaymentOverlayActivity : ComponentActivity() {
                 object : Callback {
                     override fun onSuccess() { /* discovery started */ }
                     override fun onFailure(e: TerminalException) {
-                        Log.e("TPOS_OVERLAY", "Discovery failed [${e.errorCode}]: ${e.errorMessage}")
-                        finish()
+                        val msg = "Discovery failed [${e.errorCode}]: ${e.errorMessage}"
+                        Log.e("TPOS_OVERLAY", msg)
+                        showErrorAndFinish(msg)
                     }
                 }
             )
         } catch (t: Throwable) {
-            Log.e("TPOS_OVERLAY", "Error starting discovery: ${t.message}", t)
-            finish()
+            val msg = "Error starting discovery: ${t.message ?: "Unknown error"}"
+            Log.e("TPOS_OVERLAY", msg, t)
+            showErrorAndFinish(msg)
         }
     }
 
@@ -145,5 +151,17 @@ class PaymentOverlayActivity : ComponentActivity() {
                 onFail("Retrieve failed [${e.errorCode}]: ${e.errorMessage}")
         })
     }
-}
 
+    private fun showErrorAndFinish(message: String) {
+        if (errorShown) return
+        errorShown = true
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("Tap to Pay error")
+                .setMessage(message)
+                .setCancelable(false)
+                .setPositiveButton("OK") { _, _ -> finish() }
+                .show()
+        }
+    }
+}

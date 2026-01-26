@@ -81,6 +81,17 @@
             android:textColor="@color/lnbits_text"
             android:visibility="gone" />
 
+        <Button
+            android:id="@+id/btnSimulated"
+            android:text="Simulated: ON"
+            android:textAllCaps="false"
+            android:textSize="14sp"
+            android:layout_marginTop="10dp"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:backgroundTint="@color/lnbits_card"
+            android:textColor="@color/lnbits_text" />
+
         <TextView
             android:id="@+id/tvSummary"
             android:text=""
@@ -91,4 +102,3 @@
             android:layout_height="wrap_content" />
     </LinearLayout>
 </FrameLayout>
-

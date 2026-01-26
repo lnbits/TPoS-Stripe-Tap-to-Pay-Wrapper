@@ -20,7 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.google.androidbrowserhelper.trusted.TwaLauncher
 
-// Stripe Terminal SDK (4.6.0)
+// Stripe Terminal SDK (5.1.1)
 import com.stripe.stripeterminal.Terminal
 import com.stripe.stripeterminal.external.callable.*
 import com.stripe.stripeterminal.external.models.*
@@ -33,8 +33,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
 import okhttp3.Callback as OkHttpCallback
 
 // JSON
@@ -52,6 +50,7 @@ import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import androidx.core.net.toUri
 
 class MainActivity : ComponentActivity() {
@@ -67,21 +66,20 @@ class MainActivity : ComponentActivity() {
     private fun cfgTposId() = prefs.getString("tposId", TPOS_ID_DEFAULT)!!
     private fun cfgBearer() = prefs.getString("bearer", ADMIN_BEARER_TOKEN_DEFAULT)!!
     private fun cfgLocId()  = prefs.getString("locId", TERMINAL_LOCATION_ID_DEFAULT)!!
+    private fun cfgSimulated() = prefs.getBoolean("simulated", BuildConfig.DEBUG)
     private fun hasSavedConfig(): Boolean =
         prefs.contains("origin") && prefs.contains("tposId") && prefs.contains("bearer") && prefs.contains("locId")
 
     private fun tposUrl() = "https://${cfgOrigin()}/tpos/${cfgTposId()}"
-    private fun wsUrl()   = "wss://${cfgOrigin()}/api/v1/ws/${cfgTposId()}"
     private fun stripeBase() = "https://${cfgOrigin()}/api/v1/fiat/stripe"
 
-    private val http = OkHttpClient()
+    private val http = OkHttpClient.Builder()
+        .pingInterval(15, TimeUnit.SECONDS)
+        .build()
     private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
     @Volatile private var busy = false
-    private var ws: WebSocket? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var wsReconnectPending = false
-    private var wsBackoffMs = 500L
 
     private var twaLauncher: TwaLauncher? = null
     private var terminalInitialized = false
@@ -134,34 +132,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        try { ws?.cancel() } catch (_: Throwable) {}
-        ws = null
         twaLauncher?.destroy()
         twaLauncher = null
-    }
-
-    private fun restartTposWebSocket(afterMs: Long = 600L) {
-        if (wsReconnectPending) return
-        wsReconnectPending = true
-        try { ws?.cancel() } catch (_: Throwable) {}
-        ws = null
-        mainHandler.postDelayed({
-            wsReconnectPending = false
-            startTposWebSocket()
-        }, afterMs)
-    }
-
-    private fun scheduleBackoffReconnect() {
-        val delay = wsBackoffMs.coerceAtMost(8000L)
-        Log.i("TPOS_WS", "Scheduling WS reconnect in ${delay}ms")
-        restartTposWebSocket(delay)
-        wsBackoffMs = (wsBackoffMs * 2).coerceAtMost(8000L)
     }
 
     private fun initOnboardingUi() {
         val btnScan = findViewById<Button>(R.id.btnScan)
         val btnContinue = findViewById<Button>(R.id.btnContinue)
         val tvSummary = findViewById<TextView>(R.id.tvSummary)
+        val btnSim = findViewById<Button>(R.id.btnSimulated)
 
         fun refresh() {
             if (hasSavedConfig()) {
@@ -171,6 +150,7 @@ class MainActivity : ComponentActivity() {
                 btnContinue.visibility = View.GONE
                 tvSummary.text = ""
             }
+            btnSim.text = if (cfgSimulated()) "Simulated: ON" else "Simulated: OFF"
         }
         refresh()
 
@@ -186,6 +166,12 @@ class MainActivity : ComponentActivity() {
 
         btnContinue.setOnClickListener {
             startPosFlow()
+        }
+
+        btnSim.setOnClickListener {
+            val next = !cfgSimulated()
+            prefs.edit().putBoolean("simulated", next).apply()
+            refresh()
         }
     }
 
@@ -312,11 +298,12 @@ class MainActivity : ComponentActivity() {
         }
 
         if (!terminalInitialized) {
-            Terminal.initTerminal(
+            Terminal.init(
                 applicationContext,
                 LogLevel.VERBOSE,
                 tokenProvider(),
-                object : TerminalListener {}
+                object : TerminalListener {},
+                null
             )
             terminalInitialized = true
         }
@@ -340,91 +327,12 @@ class MainActivity : ComponentActivity() {
         }, 10_000L)
     }
 
-    data class TapToPayMsg(
-        val payment_intent_id: String?,
-        val client_secret: String?,
-        val currency: String?,
-        val amount: Int?,
-        val tpos_id: String? = null,
-        val payment_hash: String? = null
-    )
     data class TokenResp(val secret: String?)
 
-    private fun parseTapToPay(raw: String): TapToPayMsg? {
-        runCatching {
-            val adapter = moshi.adapter(TapToPayMsg::class.java)
-            adapter.fromJson(raw)?.let { return it }
-        }
-        val s = raw.trim()
-            .removePrefix("TapToPay")
-            .removePrefix("TapToPay(")
-            .removeSuffix(")")
-            .replace("""['"]""".toRegex(), "")
-        val map = mutableMapOf<String, String>()
-        s.split(",", ";", " ").map { it.trim() }.forEach { p ->
-            val kv = p.split("=", ":", limit = 2).map { it.trim() }
-            if (kv.size == 2 && kv[0].isNotBlank()) map[kv[0].lowercase()] = kv[1]
-        }
-        return TapToPayMsg(
-            payment_intent_id = map["payment_intent_id"],
-            client_secret     = map["client_secret"],
-            currency          = map["currency"],
-            amount            = map["amount"]?.toIntOrNull(),
-            tpos_id           = map["tpos_id"],
-            payment_hash      = map["payment_hash"]
-        )
-    }
-
-    private fun startTposWebSocket() {
-        try { ws?.cancel() } catch (_: Throwable) {}
-        ws = null
-
-        val req = Request.Builder().url(wsUrl()).build()
-        ws = http.newWebSocket(req, object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                Log.i("TPOS_WS", "WebSocket connected")
-                wsBackoffMs = 500L
-            }
-
-            override fun onMessage(ws: WebSocket, text: String) {
-                Log.i("TPOS_WS", "Message: $text")
-                val msg = parseTapToPay(text)
-                if (msg?.client_secret.isNullOrBlank() || msg?.payment_intent_id.isNullOrBlank()) {
-                    Log.w("TPOS_WS", "Missing client_secret or payment_intent_id in payload")
-                    return
-                }
-                runOnUiThread {
-                    if (busy) {
-                        Log.i("TPOS_WS", "Ignoring WS: already collecting")
-                        return@runOnUiThread
-                    }
-                    // Always launch the transparent overlay for the Tap-to-Pay flow
-                    busy = true
-                    val i = Intent(this@MainActivity, PaymentOverlayActivity::class.java)
-                        .putExtra("client_secret", msg!!.client_secret!!)
-                        .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-                    startActivity(i)
-
-                    // Allow next cycle shortly after launch; overlay will finish() when done.
-                    mainHandler.postDelayed({ busy = false }, 500)
-                }
-            }
-
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Log.e("TPOS_WS", "WebSocket failure: ${t.message}", t)
-                scheduleBackoffReconnect()
-            }
-
-            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-                Log.i("TPOS_WS", "WebSocket closing: $code $reason")
-                try { ws.close(code, reason) } catch (_: Throwable) {}
-            }
-
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                Log.i("TPOS_WS", "WebSocket closed: $code $reason")
-                scheduleBackoffReconnect()
-            }
-        })
+    private fun startWsService() {
+        val intent = Intent(this, TposWebSocketService::class.java)
+            .setAction(TposWebSocketService.ACTION_START)
+        ContextCompat.startForegroundService(this, intent)
     }
 
     // ---- request perms helper (kept for re-use inside registration)
@@ -433,6 +341,9 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.CAMERA,
             Manifest.permission.ACCESS_FINE_LOCATION
         )
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            want += Manifest.permission.POST_NOTIFICATIONS
+        }
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             want += Manifest.permission.BLUETOOTH_SCAN
             want += Manifest.permission.BLUETOOTH_CONNECT
@@ -446,6 +357,10 @@ class MainActivity : ComponentActivity() {
 
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
             need += Manifest.permission.CAMERA
+        if (api >= 33) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                need += Manifest.permission.POST_NOTIFICATIONS
+        }
         if (api >= 31) {
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED)
                 need += Manifest.permission.BLUETOOTH_SCAN
@@ -504,8 +419,18 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        try {
+            Terminal.getInstance().connectedReader?.let {
+                readerConnected = true
+                onReady()
+                return
+            }
+        } catch (_: Throwable) {
+            // Ignore and fall through to discovery.
+        }
+
         val discoveryConfig = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(
-            isSimulated = BuildConfig.DEBUG
+            isSimulated = cfgSimulated()
         )
 
         try {
@@ -518,6 +443,7 @@ class MainActivity : ComponentActivity() {
                         Log.i("TPOS_WS", "Discovered readers: ${readers.size}")
 
                         Terminal.getInstance().connectedReader?.let {
+                            readerConnected = true
                             onReady()
                             return
                         }
@@ -534,7 +460,10 @@ class MainActivity : ComponentActivity() {
                             readers.first(),
                             cfg,
                             object : ReaderCallback {
-                                override fun onSuccess(reader: Reader) { onReady() }
+                                override fun onSuccess(reader: Reader) {
+                                    readerConnected = true
+                                    onReady()
+                                }
                                 override fun onFailure(e: TerminalException) {
                                     val msg = "Connect failed [${e.errorCode}]: ${e.errorMessage}"
                                     Log.e("TPOS_WS", msg, e)
@@ -564,7 +493,11 @@ class MainActivity : ComponentActivity() {
         val start = System.currentTimeMillis()
         fun tick() {
             val cr = try { Terminal.getInstance().connectedReader } catch (_: Throwable) { null }
-            if (cr != null) { onReady(); return }
+            if (cr != null) {
+                readerConnected = true
+                onReady()
+                return
+            }
             if (System.currentTimeMillis() - start > 12_000L) return
             mainHandler.postDelayed({ tick() }, 500L)
         }
@@ -614,7 +547,7 @@ class MainActivity : ComponentActivity() {
         btnGo.setOnClickListener {
             dlg.dismiss()
             // Now that we’re registered, start WS and launch the TWA
-            startTposWebSocket()
+            startWsService()
             if (twaLauncher == null) twaLauncher = TwaLauncher(this)
             twaLauncher?.launch(Uri.parse(tposUrl()))
         }
@@ -634,11 +567,12 @@ class MainActivity : ComponentActivity() {
 
         if (!terminalInitialized) {
             onPhase("Initializing Stripe SDK")
-            Terminal.initTerminal(
+            Terminal.init(
                 applicationContext,
                 LogLevel.VERBOSE,
                 tokenProvider(),
-                object : TerminalListener {}
+                object : TerminalListener {},
+                null
             )
             terminalInitialized = true
         }
@@ -649,7 +583,7 @@ class MainActivity : ComponentActivity() {
 
         ensurePermissions(
             onGranted = {
-                onPhase("Discovering Tap to Pay reader", "debug=${BuildConfig.DEBUG}")
+                onPhase("Discovering Tap to Pay reader", "simulated=${cfgSimulated()}")
                 discoverAndConnect(
                     onReady = {
                         val cr = Terminal.getInstance().connectedReader
