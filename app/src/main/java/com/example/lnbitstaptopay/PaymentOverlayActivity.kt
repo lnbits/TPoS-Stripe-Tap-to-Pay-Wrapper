@@ -23,6 +23,7 @@ class PaymentOverlayActivity : ComponentActivity() {
 
     private val prefs by lazy { getSharedPreferences("tpos_prefs", MODE_PRIVATE) }
     private fun cfgLocId()  = prefs.getString("locId", "")!!
+    private fun cfgSimulated() = prefs.getBoolean("simulated", BuildConfig.DEBUG)
     private var errorShown = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,7 +81,7 @@ class PaymentOverlayActivity : ComponentActivity() {
         if (connected) { onReady(); return }
 
         val discoveryConfig = DiscoveryConfiguration.TapToPayDiscoveryConfiguration(
-            isSimulated = BuildConfig.DEBUG
+            isSimulated = cfgSimulated()
         )
 
         try {

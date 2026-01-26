@@ -113,12 +113,22 @@ mv ~/Android/Sdk/cmdline-tools/cmdline-tools ~/Android/Sdk/cmdline-tools/latest
 printf "sdk.dir=%s\n" "$HOME/Android/Sdk" > local.properties
 ```
 
-### Build + install
+### Build + install (debug)
 
 ```bash
 ./gradlew :app:assembleDebug
 adb devices
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Build + install (staging, non-debuggable)
+
+Use this for real Tap-to-Pay while keeping build times close to debug.
+
+```bash
+./gradlew :app:assembleStaging
+adb devices
+adb install -r app/build/outputs/apk/staging/app-staging.apk
 ```
 
 
@@ -170,5 +180,4 @@ LNbits empowers developers and merchants with modular, open-source tools for bui
 </div>
 
 <hr style="margin: 28px 0; border: 0; border-top: 1px solid #e5e7eb;" />
-
 

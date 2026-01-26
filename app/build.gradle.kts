@@ -20,6 +20,12 @@ android {
         debug {
             isMinifyEnabled = false
         }
+        create("staging") {
+            initWith(getByName("debug"))
+            isDebuggable = false
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
