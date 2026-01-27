@@ -25,6 +25,7 @@ android {
             isDebuggable = false
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release", "debug")
         }
         release {
             isMinifyEnabled = false
@@ -67,8 +68,8 @@ dependencies {
     implementation("com.google.androidbrowserhelper:androidbrowserhelper:2.6.2")
 
     // Stripe Terminal (Tap to Pay)
-    implementation("com.stripe:stripeterminal-taptopay:5.1.1")
-    implementation("com.stripe:stripeterminal-core:5.1.1")
+    implementation("com.stripe:stripeterminal-taptopay:4.7.6")
+    implementation("com.stripe:stripeterminal-core:4.7.6")
 
     // HTTP + JSON
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
