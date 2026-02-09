@@ -1,7 +1,7 @@
 <p align="center">
 
-  <h1>TPoS-Stripe Tap-to-Pay Wrapper</h1>
-
+  <h1>TPoS-Stripe Tap-to-Pay Wrapper</h1><br>
+If you have a highend device checkout https://github.com/lnbits/TPoS-Stripe-Tap-to-Pay-Wrapper-Stripev5.<br><br>
   <a href="https://opensats.org">
     <img alt="OpenSats Supported" src="https://img.shields.io/badge/OpenSats-Supported-orange?logo=bitcoin&logoColor=white">
   </a>
@@ -16,7 +16,7 @@
   </a>
 
  <br><br>
- If you have a higher-end device checkout https://github.com/lnbits/TPoS-Stripe-Tap-to-Pay-Wrapper-Stripev5.
+ 
   <strong>One checkout. Two rails.</strong><br>
   A seamless integration for handling both fiat and Lightning payments within the LNbits ecosystem. This extension allows merchants to accept traditional card payments via Stripe's Tap-to-Pay functionality alongside instant Lightning Network transactions, providing a unified payment experience.
 
